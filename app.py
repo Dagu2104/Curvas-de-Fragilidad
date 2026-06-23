@@ -8,104 +8,124 @@ import plotly.graph_objects as go
 from scipy.optimize import minimize
 from scipy.stats import norm
 
-# ============================================================
-# APP STREAMLIT: CURVAS DE FRAGILIDAD CON REGISTROS SÍSMICOS
-# Autor: generado con ChatGPT
-# Descripción:
-# - Sube acelerogramas en una sola dirección.
-# - Calcula Sa(T) para el período de la estructura.
-# - Ajusta curvas de fragilidad lognormales para estados de daño.
-# - Permite descargar tabla de resultados.
-# ============================================================
-
 G = 9.80665
 
 
-# -------------------------
-# Lectura de acelerogramas
-# -------------------------
+# ============================================================
+# LECTURA INTELIGENTE DE ACELEROGRAMAS
+# ============================================================
 def read_accel_file(uploaded_file):
     """
-    Lee un archivo .txt/.csv con aceleraciones.
-    Acepta:
-    - Una columna: aceleración
-    - Varias columnas: intenta usar la primera columna numérica
-    - Separadores: espacios, tabulaciones, coma o punto y coma
+    Lee un acelerograma .txt/.csv.
+
+    Casos aceptados:
+
+    1) Una columna:
+       aceleracion
+
+    2) Dos columnas:
+       tiempo    aceleracion
+
+    3) Más columnas:
+       toma columna 1 como tiempo y columna 2 como aceleración,
+       si la primera columna parece ser tiempo creciente.
+
+    Retorna:
+       time_array, accel_array, dt_detected, formato_detectado
     """
+
     raw = uploaded_file.read()
     text = raw.decode("utf-8", errors="ignore")
 
-    # Reemplaza comas decimales si el archivo usa formato latino.
-    # Solo lo hace cuando parece haber números tipo 0,123.
+    # Reemplaza coma decimal por punto, si existe.
     text = re.sub(r"(?<=\d),(?=\d)", ".", text)
 
-    # Separa por espacios, tabs, coma o punto y coma
-    try:
-        df = pd.read_csv(
-            io.StringIO(text),
-            sep=r"[\s,;]+",
-            engine="python",
-            header=None,
-            comment="#"
-        )
-    except Exception:
-        df = pd.read_csv(io.StringIO(text), header=None)
+    df = pd.read_csv(
+        io.StringIO(text),
+        sep=r"[\s,;]+",
+        engine="python",
+        header=None,
+        comment="#"
+    )
 
-    # Convierte todo a numérico
     df = df.apply(pd.to_numeric, errors="coerce")
     df = df.dropna(axis=1, how="all")
     df = df.dropna(axis=0, how="all")
 
     if df.empty:
-        raise ValueError("No se encontraron datos numéricos en el archivo.")
+        raise ValueError("No se encontraron datos numéricos.")
 
-    # Usa la primera columna numérica con datos suficientes
+    numeric_cols = []
     for col in df.columns:
-        serie = df[col].dropna().to_numpy(dtype=float)
-        if len(serie) > 10:
-            return serie
+        values = df[col].dropna().to_numpy(dtype=float)
+        if len(values) > 10:
+            numeric_cols.append(col)
 
-    raise ValueError("El archivo no tiene una columna numérica válida.")
+    if len(numeric_cols) == 0:
+        raise ValueError("No hay columnas numéricas suficientes.")
+
+    # Caso de una sola columna: solo aceleración
+    if len(numeric_cols) == 1:
+        acc = df[numeric_cols[0]].dropna().to_numpy(dtype=float)
+        return None, acc, None, "Una columna: aceleración"
+
+    # Caso de dos o más columnas
+    col0 = numeric_cols[0]
+    col1 = numeric_cols[1]
+
+    x0 = df[col0].dropna().to_numpy(dtype=float)
+    x1 = df[col1].dropna().to_numpy(dtype=float)
+
+    n = min(len(x0), len(x1))
+    x0 = x0[:n]
+    x1 = x1[:n]
+
+    # Detectar si la primera columna es tiempo:
+    # - debe ser creciente
+    # - debe tener incrementos casi constantes
+    diffs = np.diff(x0)
+    positive_ratio = np.mean(diffs > 0)
+    dt_median = np.median(diffs)
+
+    if positive_ratio > 0.95 and dt_median > 0:
+        time = x0
+        acc = x1
+        dt_detected = float(dt_median)
+        return time, acc, dt_detected, "Dos columnas: tiempo + aceleración"
+
+    # Si no parece tiempo, toma segunda columna como aceleración igual,
+    # porque en registros PEER/RSN suele venir tiempo + aceleración.
+    acc = x1
+    return None, acc, None, "Varias columnas: se usó la segunda columna como aceleración"
 
 
 def convert_to_m_s2(accel, unit):
     if unit == "g":
         return accel * G
-    if unit == "m/s²":
+    elif unit == "m/s²":
         return accel
-    if unit == "cm/s²":
+    elif unit == "cm/s²":
         return accel / 100.0
-    raise ValueError("Unidad no reconocida.")
+    else:
+        raise ValueError("Unidad no reconocida.")
 
 
-# -------------------------------------
-# Newmark-beta para SDOF elástico lineal
-# -------------------------------------
+# ============================================================
+# CÁLCULO DE Sa(T) CON NEWMARK BETA
+# ============================================================
 def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
-    """
-    Calcula pseudo-aceleración espectral Sa(T) usando un oscilador SDOF.
-    Entrada:
-        acc_g_m_s2: aceleración del suelo en m/s²
-        dt: intervalo de tiempo en segundos
-        period: período estructural en segundos
-        damping: amortiguamiento, por ejemplo 0.05
-    Salida:
-        Sa en g
-    """
     if period <= 0:
         raise ValueError("El período debe ser mayor que cero.")
     if dt <= 0:
         raise ValueError("El dt debe ser mayor que cero.")
     if len(acc_g_m_s2) < 20:
-        raise ValueError("El registro tiene muy pocos puntos.")
+        raise ValueError("El registro tiene pocos puntos.")
 
-    # Parámetros SDOF normalizados
     m = 1.0
     w = 2.0 * np.pi / period
     k = m * w**2
     c = 2.0 * damping * m * w
 
-    # Newmark promedio constante
     beta = 1.0 / 4.0
     gamma = 1.0 / 2.0
 
@@ -114,10 +134,7 @@ def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
     v = np.zeros(n)
     a = np.zeros(n)
 
-    # Ecuación: m*u'' + c*u' + k*u = -m*ag
     p = -m * acc_g_m_s2
-
-    # Aceleración inicial relativa
     a[0] = (p[0] - c * v[0] - k * u[0]) / m
 
     a0 = 1.0 / (beta * dt**2)
@@ -143,17 +160,14 @@ def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
     sd = np.max(np.abs(u))
     psa_m_s2 = w**2 * sd
     psa_g = psa_m_s2 / G
-    return psa_g
+
+    return float(psa_g)
 
 
-# --------------------------------
-# Ajuste de fragilidad lognormal
-# --------------------------------
+# ============================================================
+# FRAGILIDAD LOGNORMAL
+# ============================================================
 def fit_lognormal_fragility(im_values, exceedance):
-    """
-    Ajusta P(DS >= ds | IM) = Phi((ln(IM)-ln(theta))/beta)
-    por máxima verosimilitud para datos binarios.
-    """
     im_values = np.asarray(im_values, dtype=float)
     y = np.asarray(exceedance, dtype=int)
 
@@ -161,8 +175,11 @@ def fit_lognormal_fragility(im_values, exceedance):
     im_values = im_values[mask]
     y = y[mask]
 
+    if len(im_values) < 3:
+        return None, None, "Se necesitan más registros."
+
     if len(np.unique(y)) < 2:
-        return None, None, "No se puede ajustar: todos los registros quedan del mismo lado del estado de daño."
+        return None, None, "No se puede ajustar: todos los registros están del mismo lado del estado de daño."
 
     def neg_loglike(params):
         ln_theta, ln_beta = params
@@ -176,13 +193,10 @@ def fit_lognormal_fragility(im_values, exceedance):
     res = minimize(neg_loglike, x0, method="Nelder-Mead")
 
     if not res.success:
-        return None, None, "No se pudo ajustar correctamente."
+        return None, None, "No se pudo ajustar."
 
     theta = float(np.exp(res.x[0]))
     beta = float(np.exp(res.x[1]))
-
-    if beta <= 0 or not np.isfinite(beta):
-        return None, None, "Beta inválido."
 
     return theta, beta, "OK"
 
@@ -191,33 +205,31 @@ def fragility_probability(im_grid, theta, beta):
     return norm.cdf((np.log(im_grid) - np.log(theta)) / beta)
 
 
-# -------------------------
-# Interfaz Streamlit
-# -------------------------
+# ============================================================
+# INTERFAZ STREAMLIT
+# ============================================================
 st.set_page_config(
     page_title="Curvas de Fragilidad Sísmica",
     page_icon="📈",
     layout="wide"
 )
 
-st.title("📈 Curvas de fragilidad sísmica usando registros en una dirección")
+st.title("📈 Curvas de fragilidad sísmica con registros en una dirección")
 
 st.markdown(
     """
-Esta app permite subir acelerogramas en una sola dirección, calcular la aceleración espectral **Sa(T)** 
-para el período de la estructura y generar curvas de fragilidad lognormales.
+Sube registros sísmicos `.txt` o `.csv`.  
+El programa detecta automáticamente si el archivo viene como:
 
-**Flujo de trabajo:**
-1. Sube registros sísmicos `.txt` o `.csv`.
-2. Ingresa el período estructural `T`.
-3. Define `dt`, unidad del acelerograma y amortiguamiento.
-4. Define límites de daño en términos de `Sa(T)`.
-5. La app calcula y grafica las curvas de fragilidad.
+- **una columna:** aceleración
+- **dos columnas:** tiempo + aceleración
+
+Si detecta columna de tiempo, calcula automáticamente el `dt`.
 """
 )
 
 with st.sidebar:
-    st.header("Datos de entrada")
+    st.header("Datos de la estructura")
 
     period = st.number_input(
         "Período de la estructura, T (s)",
@@ -225,14 +237,6 @@ with st.sidebar:
         value=0.50,
         step=0.01,
         format="%.3f"
-    )
-
-    dt = st.number_input(
-        "Intervalo de tiempo del registro, dt (s)",
-        min_value=0.0001,
-        value=0.005,
-        step=0.001,
-        format="%.4f"
     )
 
     damping = st.number_input(
@@ -244,19 +248,31 @@ with st.sidebar:
         format="%.3f"
     )
 
+    st.header("Datos del registro")
+
+    dt_manual = st.number_input(
+        "dt manual, solo si el archivo tiene una columna (s)",
+        min_value=0.0001,
+        value=0.005,
+        step=0.001,
+        format="%.4f"
+    )
+
     unit = st.selectbox(
         "Unidad de aceleración en los archivos",
         ["g", "m/s²", "cm/s²"]
     )
 
     st.divider()
+
     st.header("Estados de daño")
-    st.caption("Define los límites de daño en Sa(T), en unidades de g.")
+    st.caption("Límites en función de Sa(T), en g.")
 
     ds_leve = st.number_input("Daño leve: Sa ≥", min_value=0.001, value=0.15, step=0.01, format="%.3f")
     ds_moderado = st.number_input("Daño moderado: Sa ≥", min_value=0.001, value=0.30, step=0.01, format="%.3f")
     ds_severo = st.number_input("Daño severo: Sa ≥", min_value=0.001, value=0.50, step=0.01, format="%.3f")
     ds_colapso = st.number_input("Colapso: Sa ≥", min_value=0.001, value=0.80, step=0.01, format="%.3f")
+
 
 uploaded_files = st.file_uploader(
     "Sube acelerogramas de una sola dirección",
@@ -264,39 +280,55 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
+
 if uploaded_files:
     results = []
-
     progress = st.progress(0, text="Procesando registros...")
 
     for i, file in enumerate(uploaded_files):
         try:
-            accel_raw = read_accel_file(file)
+            time, accel_raw, dt_detected, formato = read_accel_file(file)
+
+            if dt_detected is not None:
+                dt_usado = dt_detected
+            else:
+                dt_usado = dt_manual
+
             accel_m_s2 = convert_to_m_s2(accel_raw, unit)
 
             pga_g = np.max(np.abs(accel_m_s2)) / G
+
             sa_g = spectral_acceleration_newmark(
                 accel_m_s2,
-                dt=dt,
+                dt=dt_usado,
                 period=period,
                 damping=damping
             )
 
             results.append({
                 "Registro": file.name,
+                "Formato detectado": formato,
                 "Puntos": len(accel_raw),
+                "dt usado (s)": dt_usado,
+                "Acel. mín": np.min(accel_raw),
+                "Acel. máx": np.max(accel_raw),
                 "PGA (g)": pga_g,
                 f"Sa(T={period:.3f}s) (g)": sa_g,
                 "DS leve": int(sa_g >= ds_leve),
                 "DS moderado": int(sa_g >= ds_moderado),
                 "DS severo": int(sa_g >= ds_severo),
                 "DS colapso": int(sa_g >= ds_colapso),
+                "Error": ""
             })
 
         except Exception as e:
             results.append({
                 "Registro": file.name,
+                "Formato detectado": "",
                 "Puntos": None,
+                "dt usado (s)": None,
+                "Acel. mín": None,
+                "Acel. máx": None,
                 "PGA (g)": None,
                 f"Sa(T={period:.3f}s) (g)": None,
                 "DS leve": None,
@@ -321,7 +353,7 @@ if uploaded_files:
     if not valid_df.empty:
         csv_data = df.to_csv(index=False).encode("utf-8")
         st.download_button(
-            "Descargar resultados en CSV",
+            "Descargar resultados CSV",
             data=csv_data,
             file_name="resultados_fragilidad.csv",
             mime="text/csv"
@@ -330,7 +362,7 @@ if uploaded_files:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("Sa(T) calculada")
+            st.subheader("Sa(T) por registro")
             fig_sa = go.Figure()
             fig_sa.add_trace(go.Bar(
                 x=valid_df["Registro"],
@@ -389,19 +421,13 @@ if uploaded_files:
                     mode="lines",
                     name=f"DS {ds_name}"
                 ))
-                fit_rows.append({
-                    "Estado de daño": ds_name,
-                    "θ / mediana Sa (g)": theta,
-                    "β / dispersión lognormal": beta,
-                    "Estado": status
-                })
-            else:
-                fit_rows.append({
-                    "Estado de daño": ds_name,
-                    "θ / mediana Sa (g)": None,
-                    "β / dispersión lognormal": None,
-                    "Estado": status
-                })
+
+            fit_rows.append({
+                "Estado de daño": ds_name,
+                "θ / mediana Sa (g)": theta,
+                "β / dispersión lognormal": beta,
+                "Estado": status
+            })
 
         fig_frag.update_layout(
             xaxis_title="IM = Sa(T) [g]",
@@ -417,50 +443,40 @@ if uploaded_files:
 
         st.info(
             """
-Nota técnica: esta versión usa una curva de fragilidad lognormal ajustada con datos binarios 
-de excedencia. Para un estudio formal, lo ideal es usar derivas máximas o demandas estructurales 
-obtenidas por análisis dinámico incremental o análisis tiempo-historia.
+Revisa las columnas **Acel. mín**, **Acel. máx**, **PGA** y **dt usado**.
+Si tu registro está en g, los valores de PGA deberían estar en un rango razonable, por ejemplo 0.01 g a 2 g,
+dependiendo del registro. Si sale 100 g, todavía se está leyendo mal el archivo.
 """
         )
 
-    else:
-        st.error("No se pudo calcular Sa(T) para ningún registro válido.")
-
 else:
-    st.warning("Sube uno o varios acelerogramas para iniciar el cálculo.")
+    st.warning("Sube uno o varios acelerogramas para iniciar.")
 
-st.divider()
 
-with st.expander("Formato recomendado de los archivos"):
+with st.expander("Formato recomendado"):
     st.markdown(
         """
-Cada archivo puede ser `.txt` o `.csv`.
-
-Formato recomendado:
+Formato de dos columnas recomendado:
 
 ```txt
-0.0012
-0.0034
--0.0021
--0.0045
-...
+0.000000    2.177299e-04
+0.005000    2.177415e-04
+0.010000    2.177215e-04
 ```
 
-También se aceptan archivos con varias columnas, pero la app tomará la primera columna numérica válida.
+En ese caso:
 
-**Importante:** todos los registros subidos deben tener el mismo `dt` y la misma unidad.
-"""
-    )
+- columna 1 = tiempo
+- columna 2 = aceleración
 
-with st.expander("¿Qué significa cada parámetro?"):
-    st.markdown(
-        """
-- **T:** período fundamental de la estructura.
-- **dt:** intervalo de tiempo del acelerograma.
-- **ξ:** amortiguamiento, normalmente 5% para estructuras convencionales.
-- **Sa(T):** aceleración espectral en el período de la estructura.
-- **θ:** mediana de la curva de fragilidad.
-- **β:** dispersión lognormal.
-- **P(DS ≥ ds | Sa):** probabilidad de exceder un estado de daño para una intensidad sísmica dada.
+Formato de una columna aceptado:
+
+```txt
+2.177299e-04
+2.177415e-04
+2.177215e-04
+```
+
+En ese caso debes ingresar manualmente el `dt`.
 """
     )
