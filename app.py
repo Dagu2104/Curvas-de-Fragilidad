@@ -148,24 +148,50 @@ def make_scaled_txt(time, acc_scaled_original_unit):
 # ============================================================
 def detect_direction_and_base(filename):
     """
-    Detecta nombres que terminan en:
-    _N, _E, -N, -E, N, E antes de la extensión.
+    Detecta la dirección N/E y agrupa los pares por número RSN.
+
+    Ejemplos:
+    1_RSN730_SPITAK_GUK000_N.txt  -> base: 1_RSN730, dir: N
+    1_RSN730_SPITAK_GUK090_E.txt  -> base: 1_RSN730, dir: E
+
+    Esto evita que GUK000 y GUK090 se traten como registros diferentes.
     """
+
     stem = Path(filename).stem.strip()
 
-    m = re.match(r"^(.*?)[_\-\s]+([NE])$", stem, flags=re.IGNORECASE)
-    if m:
-        base = m.group(1).strip()
-        direction = m.group(2).upper()
+    # Detectar dirección al final: _N, _E, -N, -E
+    m_dir = re.search(r"[_\-\s]+([NE])$", stem, flags=re.IGNORECASE)
+
+    if not m_dir:
+        return None, None
+
+    direction = m_dir.group(1).upper()
+
+    # Quitar la dirección final
+    stem_no_dir = re.sub(r"[_\-\s]+[NE]$", "", stem, flags=re.IGNORECASE)
+
+    # Conservar prefijo numérico si existe, por ejemplo: 1_RSN730...
+    prefix = ""
+    rest = stem_no_dir
+
+    m_prefix = re.match(r"^(\d+_)(.*)$", stem_no_dir)
+
+    if m_prefix:
+        prefix = m_prefix.group(1)
+        rest = m_prefix.group(2)
+
+    # Buscar número RSN
+    m_rsn = re.search(r"(RSN\d+)", rest, flags=re.IGNORECASE)
+
+    if m_rsn:
+        base = prefix + m_rsn.group(1).upper()
         return base, direction
 
-    m = re.match(r"^(.*?)([NE])$", stem, flags=re.IGNORECASE)
-    if m and len(m.group(1)) > 3:
-        base = m.group(1).rstrip("_- ").strip()
-        direction = m.group(2).upper()
-        return base, direction
+    # Si no encuentra RSN, usa un método alternativo:
+    # elimina códigos finales tipo _GUK000, _GUK090, _CYC285, etc.
+    base = re.sub(r"[_\-][A-Za-z]*\d{3}$", "", stem_no_dir)
 
-    return None, None
+    return base, direction
 
 
 def build_pairs(uploaded_files):
