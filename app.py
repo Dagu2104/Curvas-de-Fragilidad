@@ -30,7 +30,6 @@ def read_accel_file(uploaded_file):
     raw = uploaded_file.read()
     text = raw.decode("utf-8", errors="ignore")
 
-    # Convierte coma decimal a punto: 0,123 -> 0.123
     text = re.sub(r"(?<=\d),(?=\d)", ".", text)
 
     df = pd.read_csv(
@@ -120,7 +119,6 @@ def read_objective_spectrum(uploaded_file):
     t = t[order]
     sa = sa[order]
 
-    # Remover períodos duplicados promediando
     out = pd.DataFrame({"T (s)": t, "Sa objetivo (g)": sa})
     out = out.groupby("T (s)", as_index=False).mean()
 
@@ -152,22 +150,15 @@ def detect_direction_and_base(filename):
     """
     Detecta nombres que terminan en:
     _N, _E, -N, -E, N, E antes de la extensión.
-
-    Ejemplos:
-    RSN4031_xxx_N.txt -> base RSN4031_xxx, dir N
-    RSN4031_xxx_E.txt -> base RSN4031_xxx, dir E
     """
     stem = Path(filename).stem.strip()
 
-    # Casos con separador _N, _E, -N, -E
     m = re.match(r"^(.*?)[_\-\s]+([NE])$", stem, flags=re.IGNORECASE)
     if m:
         base = m.group(1).strip()
         direction = m.group(2).upper()
         return base, direction
 
-    # Caso final directo N/E, pero solo si antes hay número o letra.
-    # Es menos recomendado, pero ayuda con nombres tipo Registro01N.txt
     m = re.match(r"^(.*?)([NE])$", stem, flags=re.IGNORECASE)
     if m and len(m.group(1)) > 3:
         base = m.group(1).rstrip("_- ").strip()
@@ -178,9 +169,6 @@ def detect_direction_and_base(filename):
 
 
 def build_pairs(uploaded_files):
-    """
-    Agrupa archivos por nombre base y dirección N/E.
-    """
     groups = {}
 
     for f in uploaded_files:
@@ -246,9 +234,6 @@ def build_pairs(uploaded_files):
 # NEWMARK BETA
 # ============================================================
 def spectral_sa_sd_newmark(acc_g_m_s2, dt, period, damping=0.05):
-    """
-    Calcula pseudo-aceleración espectral Sa en g y desplazamiento espectral Sd en m.
-    """
     if period <= 0:
         raise ValueError("El período debe ser mayor que cero.")
     if dt <= 0:
@@ -328,16 +313,9 @@ def response_spectrum_cached(acc_tuple, dt, periods_tuple, damping):
 
 
 # ============================================================
-# ESCALAMIENTO TIPO EXCEL
+# ESCALAMIENTO
 # ============================================================
 def compute_global_factor(mean_srss, target_sa, mask_range, criterion="100%"):
-    """
-    Calcula factor global para que la media SRSS escalada cumpla el objetivo en el rango.
-
-    criterion:
-    - "100%": media escalada >= 1.00 objetivo
-    - "90%": media escalada >= 0.90 objetivo
-    """
     target_multiplier = 1.0 if criterion == "100%" else 0.90
 
     ratios = (target_multiplier * target_sa[mask_range]) / mean_srss[mask_range]
@@ -370,14 +348,15 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("📈 Escalamiento de pares N/E por media SRSS contra espectro objetivo")
+st.title("📈 Pares N/E: SRSS, media y escalamiento opcional")
 
 st.markdown(
     """
-Esta app replica el flujo típico de Excel:
+Esta app permite dos flujos:
 
 ```text
-Pares N/E → Sa_N(T), Sa_E(T) → SRSS → media SRSS → escalamiento en 0.2T1–1.5T1
+1. Registros sin escalar → calcula factor contra espectro objetivo y genera escalados.
+2. Registros ya escalados → no pide espectro objetivo, no escala, usa factor = 1.0.
 ```
 
 Los pares se detectan automáticamente usando archivos que terminan en `_N` y `_E`.
@@ -385,6 +364,14 @@ Los pares se detectan automáticamente usando archivos que terminan en `_N` y `_
 )
 
 with st.sidebar:
+    st.header("0. Modo de trabajo")
+
+    already_scaled = st.checkbox(
+        "Mis registros ya están escalados",
+        value=False,
+        help="Activa esto si tus registros ya fueron escalados previamente, por ejemplo con RotD50. En ese caso no se solicita espectro objetivo ni se aplica factor de escala."
+    )
+
     st.header("1. Parámetros estructurales")
 
     T1 = st.number_input(
@@ -414,7 +401,7 @@ with st.sidebar:
     T_low = lower_mult * T1
     T_high = upper_mult * T1
 
-    st.info(f"Rango de escalamiento: {T_low:.4f} s a {T_high:.4f} s")
+    st.info(f"Rango de referencia: {T_low:.4f} s a {T_high:.4f} s")
 
     damping = st.number_input(
         "Amortiguamiento ξ",
@@ -440,7 +427,7 @@ with st.sidebar:
         format="%.4f"
     )
 
-    st.header("3. Espectro")
+    st.header("3. Espectros")
 
     t_min = st.number_input(
         "T mínimo para cálculo de espectros (s)",
@@ -466,29 +453,38 @@ with st.sidebar:
         step=10
     )
 
-    st.header("4. Método de escalamiento")
+    st.header("4. Método")
 
-    scale_method = st.selectbox(
-        "Método",
-        [
-            "Factor global: media SRSS escalada ≥ objetivo",
-            "Factor por par: cada SRSS escalado ≥ objetivo",
-            "Solo calcular, sin escalar"
-        ]
-    )
+    if not already_scaled:
+        scale_method = st.selectbox(
+            "Método de escalamiento",
+            [
+                "Factor global: media SRSS escalada ≥ objetivo",
+                "Factor por par: cada SRSS escalado ≥ objetivo",
+                "Solo calcular, sin escalar"
+            ]
+        )
 
-    criterion = st.radio(
-        "Criterio de cumplimiento",
-        ["100%", "90%"],
-        index=0
-    )
+        criterion = st.radio(
+            "Criterio de cumplimiento",
+            ["100%", "90%"],
+            index=0
+        )
+    else:
+        scale_method = "Solo calcular, sin escalar"
+        criterion = "No aplica"
+        st.success("Modo registros ya escalados: factor = 1.0")
 
     show_individual = st.checkbox("Mostrar SRSS individuales", value=False)
     show_original_mean = st.checkbox("Mostrar media SRSS original", value=True)
 
     st.header("5. Exportación")
 
-    generar_zip = st.checkbox("Generar ZIP con acelerogramas escalados", value=True)
+    generar_zip = st.checkbox(
+        "Generar ZIP con acelerogramas procesados",
+        value=not already_scaled,
+        help="Si los registros ya están escalados, normalmente no necesitas generar ZIP."
+    )
 
 
 uploaded_records = st.file_uploader(
@@ -497,10 +493,16 @@ uploaded_records = st.file_uploader(
     accept_multiple_files=True
 )
 
-uploaded_objective = st.file_uploader(
-    "Sube el espectro objetivo en dos columnas: T, Sa(g)",
-    type=["txt", "csv"]
-)
+uploaded_objective = None
+
+if not already_scaled:
+    uploaded_objective = st.file_uploader(
+        "Sube el espectro objetivo en dos columnas: T, Sa(g)",
+        type=["txt", "csv"]
+    )
+else:
+    st.info("Modo registros ya escalados: no se requiere espectro objetivo.")
+
 
 if uploaded_records:
     pair_df, complete_pairs, warnings = build_pairs(uploaded_records)
@@ -519,29 +521,34 @@ if uploaded_records:
 
     st.success(f"Pares completos detectados: {len(complete_pairs)}")
 
-if uploaded_records and uploaded_objective:
+
+can_process = False
+
+if uploaded_records:
+    if already_scaled:
+        can_process = True
+    elif uploaded_objective is not None:
+        can_process = True
+
+if can_process:
     try:
-        obj_df_raw = read_objective_spectrum(uploaded_objective)
-
         periods = np.linspace(float(t_min), float(t_max), int(n_periods))
-
-        if T_low < periods.min() or T_high > periods.max():
-            st.warning(
-                f"El rango {T_low:.3f}–{T_high:.3f} s queda parcialmente fuera del rango de espectros calculado "
-                f"{periods.min():.3f}–{periods.max():.3f} s."
-            )
-
-        target_sa = np.interp(
-            periods,
-            obj_df_raw["T (s)"].to_numpy(dtype=float),
-            obj_df_raw["Sa objetivo (g)"].to_numpy(dtype=float)
-        )
-
         mask_range = (periods >= T_low) & (periods <= T_high)
 
         if not np.any(mask_range):
             st.error("No hay períodos dentro del rango 0.2T1–1.5T1. Ajusta T mínimo, T máximo o T1.")
             st.stop()
+
+        if already_scaled:
+            target_sa = None
+            obj_df_raw = None
+        else:
+            obj_df_raw = read_objective_spectrum(uploaded_objective)
+            target_sa = np.interp(
+                periods,
+                obj_df_raw["T (s)"].to_numpy(dtype=float),
+                obj_df_raw["Sa objetivo (g)"].to_numpy(dtype=float)
+            )
 
         pair_results = []
         srss_matrix = []
@@ -555,12 +562,10 @@ if uploaded_records and uploaded_objective:
             fN = pair["N"]
             fE = pair["E"]
 
-            # Leer N
             time_N, acc_N_unit, dt_N_detected, fmt_N = read_accel_file(fN)
             dt_N = dt_N_detected if dt_N_detected is not None else dt_manual
             acc_N_m_s2 = convert_to_m_s2(acc_N_unit, unit)
 
-            # Leer E
             time_E, acc_E_unit, dt_E_detected, fmt_E = read_accel_file(fE)
             dt_E = dt_E_detected if dt_E_detected is not None else dt_manual
             acc_E_m_s2 = convert_to_m_s2(acc_E_unit, unit)
@@ -591,7 +596,6 @@ if uploaded_records and uploaded_objective:
             pga_N = np.max(np.abs(acc_N_m_s2)) / G
             pga_E = np.max(np.abs(acc_E_m_s2)) / G
 
-            # Sa SRSS en T1 interpolado
             saN_T1 = float(np.interp(T1, periods, sa_N))
             saE_T1 = float(np.interp(T1, periods, sa_E))
             srss_T1 = float(np.sqrt(saN_T1**2 + saE_T1**2))
@@ -640,62 +644,76 @@ if uploaded_records and uploaded_objective:
         srss_matrix = np.vstack(srss_matrix)
         mean_srss = np.mean(srss_matrix, axis=0)
 
-        if scale_method == "Factor global: media SRSS escalada ≥ objetivo":
-            global_factor = compute_global_factor(mean_srss, target_sa, mask_range, criterion=criterion)
-            pair_factors = np.full(len(complete_pairs), global_factor)
-            factor_message = f"Factor global calculado = {global_factor:.4f}"
-
-        elif scale_method == "Factor por par: cada SRSS escalado ≥ objetivo":
-            global_factor = None
-            pair_factors = []
-            for i in range(len(complete_pairs)):
-                fac_i = compute_individual_pair_factor(srss_matrix[i, :], target_sa, mask_range, criterion=criterion)
-                pair_factors.append(fac_i)
-            pair_factors = np.asarray(pair_factors, dtype=float)
-            factor_message = "Se calculó un factor independiente para cada par."
-
-        else:
+        if already_scaled:
             global_factor = 1.0
             pair_factors = np.ones(len(complete_pairs))
-            factor_message = "Sin escalamiento. Factor = 1.0"
+            mean_srss_scaled = mean_srss.copy()
+            scaled_srss_matrix = srss_matrix.copy()
+            factor_message = "Registros ya escalados: se usó factor = 1.0. No se solicitó espectro objetivo."
 
-        scaled_srss_matrix = srss_matrix * pair_factors[:, None]
-        mean_srss_scaled = np.mean(scaled_srss_matrix, axis=0)
+        else:
+            if scale_method == "Factor global: media SRSS escalada ≥ objetivo":
+                global_factor = compute_global_factor(mean_srss, target_sa, mask_range, criterion=criterion)
+                pair_factors = np.full(len(complete_pairs), global_factor)
+                factor_message = f"Factor global calculado = {global_factor:.4f}"
+
+            elif scale_method == "Factor por par: cada SRSS escalado ≥ objetivo":
+                global_factor = None
+                pair_factors = []
+                for i in range(len(complete_pairs)):
+                    fac_i = compute_individual_pair_factor(srss_matrix[i, :], target_sa, mask_range, criterion=criterion)
+                    pair_factors.append(fac_i)
+                pair_factors = np.asarray(pair_factors, dtype=float)
+                factor_message = "Se calculó un factor independiente para cada par."
+
+            else:
+                global_factor = 1.0
+                pair_factors = np.ones(len(complete_pairs))
+                factor_message = "Sin escalamiento. Factor = 1.0"
+
+            scaled_srss_matrix = srss_matrix * pair_factors[:, None]
+            mean_srss_scaled = np.mean(scaled_srss_matrix, axis=0)
 
         st.subheader("2. Resumen de pares y factores")
         pair_results_df = pd.DataFrame(pair_results)
         pair_results_df["Factor aplicado"] = pair_factors
+        pair_results_df["Registros ya escalados"] = "Sí" if already_scaled else "No"
         st.dataframe(pair_results_df, use_container_width=True)
         st.info(factor_message)
 
-        # Sa objetivo en T1
-        sa_obj_T1 = float(np.interp(T1, periods, target_sa))
         mean_srss_T1 = float(np.interp(T1, periods, mean_srss))
         mean_srss_scaled_T1 = float(np.interp(T1, periods, mean_srss_scaled))
 
-        summary_df = pd.DataFrame([
+        summary_rows = [
+            {"Parámetro": "Modo", "Valor": "Registros ya escalados" if already_scaled else "Registros sin escalar"},
             {"Parámetro": "T1 (s)", "Valor": T1},
             {"Parámetro": f"{lower_mult:.2f}T1 (s)", "Valor": T_low},
             {"Parámetro": f"{upper_mult:.2f}T1 (s)", "Valor": T_high},
-            {"Parámetro": "Sa objetivo en T1 (g)", "Valor": sa_obj_T1},
-            {"Parámetro": "Media SRSS original en T1 (g)", "Valor": mean_srss_T1},
-            {"Parámetro": "Media SRSS escalada en T1 (g)", "Valor": mean_srss_scaled_T1},
+            {"Parámetro": "Media SRSS original/procesada en T1 (g)", "Valor": mean_srss_T1},
+            {"Parámetro": "Media SRSS final en T1 (g)", "Valor": mean_srss_scaled_T1},
             {"Parámetro": "Factor global", "Valor": global_factor if global_factor is not None else np.nan},
-        ])
+        ]
+
+        if not already_scaled:
+            sa_obj_T1 = float(np.interp(T1, periods, target_sa))
+            summary_rows.insert(4, {"Parámetro": "Sa objetivo en T1 (g)", "Valor": sa_obj_T1})
+
+        summary_df = pd.DataFrame(summary_rows)
 
         st.subheader("3. Resumen general")
         st.dataframe(summary_df, use_container_width=True)
 
         # ====================================================
-        # GRÁFICA TIPO EXCEL
+        # GRÁFICA
         # ====================================================
-        st.subheader("4. Gráfica tipo Excel: media SRSS vs espectro objetivo")
+        st.subheader("4. Gráfica SRSS")
 
         fig = go.Figure()
 
         if show_individual:
             for i, pair in enumerate(complete_pairs):
                 base_name = pair["base"]
+
                 fig.add_trace(go.Scatter(
                     x=periods,
                     y=srss_matrix[i, :],
@@ -705,16 +723,17 @@ if uploaded_records and uploaded_objective:
                     name=f"SRSS original {base_name}"
                 ))
 
-                fig.add_trace(go.Scatter(
-                    x=periods,
-                    y=scaled_srss_matrix[i, :],
-                    mode="lines",
-                    line=dict(width=1, dash="dot"),
-                    opacity=0.35,
-                    name=f"SRSS escalado {base_name}"
-                ))
+                if not already_scaled:
+                    fig.add_trace(go.Scatter(
+                        x=periods,
+                        y=scaled_srss_matrix[i, :],
+                        mode="lines",
+                        line=dict(width=1, dash="dot"),
+                        opacity=0.35,
+                        name=f"SRSS escalado {base_name}"
+                    ))
 
-        if show_original_mean:
+        if show_original_mean and not already_scaled:
             fig.add_trace(go.Scatter(
                 x=periods,
                 y=mean_srss,
@@ -723,23 +742,31 @@ if uploaded_records and uploaded_objective:
                 name="Media SRSS original"
             ))
 
-        fig.add_trace(go.Scatter(
-            x=periods,
-            y=mean_srss_scaled,
-            mode="lines",
-            line=dict(width=4),
-            name="Media SRSS escalada"
-        ))
+        if already_scaled:
+            fig.add_trace(go.Scatter(
+                x=periods,
+                y=mean_srss,
+                mode="lines",
+                line=dict(width=4),
+                name="Media SRSS registros ya escalados"
+            ))
+        else:
+            fig.add_trace(go.Scatter(
+                x=periods,
+                y=mean_srss_scaled,
+                mode="lines",
+                line=dict(width=4),
+                name="Media SRSS escalada"
+            ))
 
-        fig.add_trace(go.Scatter(
-            x=periods,
-            y=target_sa,
-            mode="lines",
-            line=dict(width=4),
-            name="Espectro objetivo"
-        ))
+            fig.add_trace(go.Scatter(
+                x=periods,
+                y=target_sa,
+                mode="lines",
+                line=dict(width=4),
+                name="Espectro objetivo"
+            ))
 
-        # Rango sombreado
         fig.add_vrect(
             x0=T_low,
             x1=T_high,
@@ -774,8 +801,10 @@ if uploaded_records and uploaded_objective:
             annotation_position="top"
         )
 
+        title = "Media SRSS de registros ya escalados" if already_scaled else "Escalamiento de registros por media SRSS"
+
         fig.update_layout(
-            title="Escalamiento de registros por media SRSS",
+            title=title,
             xaxis_title="T [s]",
             yaxis_title="Sa [g]",
             legend_title="Curvas",
@@ -785,31 +814,42 @@ if uploaded_records and uploaded_objective:
         st.plotly_chart(fig, use_container_width=True)
 
         # ====================================================
-        # VERIFICACIÓN DEL CUMPLIMIENTO
+        # VERIFICACIÓN
         # ====================================================
-        multiplier = 1.0 if criterion == "100%" else 0.90
-        ratio_scaled_to_target = mean_srss_scaled[mask_range] / (multiplier * target_sa[mask_range])
-        min_ratio = float(np.min(ratio_scaled_to_target))
-        min_idx_local = int(np.argmin(ratio_scaled_to_target))
-        T_crit = float(periods[mask_range][min_idx_local])
+        if not already_scaled:
+            multiplier = 1.0 if criterion == "100%" else 0.90
+            ratio_scaled_to_target = mean_srss_scaled[mask_range] / (multiplier * target_sa[mask_range])
+            min_ratio = float(np.min(ratio_scaled_to_target))
+            min_idx_local = int(np.argmin(ratio_scaled_to_target))
+            T_crit = float(periods[mask_range][min_idx_local])
 
-        st.subheader("5. Verificación en el rango de escalamiento")
+            st.subheader("5. Verificación en el rango de escalamiento")
 
-        check_df = pd.DataFrame({
-            "T (s)": periods[mask_range],
-            "Sa objetivo (g)": target_sa[mask_range],
-            "Media SRSS escalada (g)": mean_srss_scaled[mask_range],
-            "Relación media/objetivo": mean_srss_scaled[mask_range] / target_sa[mask_range]
-        })
+            check_df = pd.DataFrame({
+                "T (s)": periods[mask_range],
+                "Sa objetivo (g)": target_sa[mask_range],
+                "Media SRSS escalada (g)": mean_srss_scaled[mask_range],
+                "Relación media/objetivo": mean_srss_scaled[mask_range] / target_sa[mask_range]
+            })
 
-        st.write(f"Relación mínima respecto al criterio {criterion}: **{min_ratio:.4f}** en T = **{T_crit:.4f} s**")
+            st.write(f"Relación mínima respecto al criterio {criterion}: **{min_ratio:.4f}** en T = **{T_crit:.4f} s**")
 
-        if min_ratio >= 0.999:
-            st.success("Cumple: la media SRSS escalada no queda por debajo del criterio en el rango.")
+            if min_ratio >= 0.999:
+                st.success("Cumple: la media SRSS escalada no queda por debajo del criterio en el rango.")
+            else:
+                st.error("No cumple: la media SRSS escalada queda por debajo del criterio en algún punto del rango.")
+
+            st.dataframe(check_df, use_container_width=True)
+
         else:
-            st.error("No cumple: la media SRSS escalada queda por debajo del criterio en algún punto del rango.")
+            st.subheader("5. Verificación")
+            st.info("Modo registros ya escalados: se omitió la verificación contra espectro objetivo porque no se cargó espectro objetivo.")
 
-        st.dataframe(check_df, use_container_width=True)
+            check_df = pd.DataFrame({
+                "T (s)": periods[mask_range],
+                "Media SRSS registros ya escalados (g)": mean_srss[mask_range]
+            })
+            st.dataframe(check_df, use_container_width=True)
 
         # ====================================================
         # DESCARGAS
@@ -818,12 +858,18 @@ if uploaded_records and uploaded_objective:
 
         csv_pairs = pair_results_df.to_csv(index=False).encode("utf-8")
 
-        spectra_out = pd.DataFrame({
-            "T (s)": periods,
-            "Sa objetivo (g)": target_sa,
-            "Media SRSS original (g)": mean_srss,
-            "Media SRSS escalada (g)": mean_srss_scaled
-        })
+        if already_scaled:
+            spectra_out = pd.DataFrame({
+                "T (s)": periods,
+                "Media SRSS registros ya escalados (g)": mean_srss
+            })
+        else:
+            spectra_out = pd.DataFrame({
+                "T (s)": periods,
+                "Sa objetivo (g)": target_sa,
+                "Media SRSS original (g)": mean_srss,
+                "Media SRSS escalada (g)": mean_srss_scaled
+            })
 
         csv_spectra = spectra_out.to_csv(index=False).encode("utf-8")
         csv_check = check_df.to_csv(index=False).encode("utf-8")
@@ -842,7 +888,7 @@ if uploaded_records and uploaded_objective:
             st.download_button(
                 "Descargar espectros CSV",
                 data=csv_spectra,
-                file_name="media_srss_escalada_vs_objetivo.csv",
+                file_name="media_srss_resultados.csv",
                 mime="text/csv"
             )
 
@@ -850,7 +896,7 @@ if uploaded_records and uploaded_objective:
             st.download_button(
                 "Descargar verificación CSV",
                 data=csv_check,
-                file_name="verificacion_rango_escalamiento.csv",
+                file_name="verificacion_rango.csv",
                 mime="text/csv"
             )
 
@@ -865,25 +911,34 @@ if uploaded_records and uploaded_objective:
                     dataN = parsed_files_store[base_name]["N"]
                     dataE = parsed_files_store[base_name]["E"]
 
-                    accN_scaled = dataN["acc_unit"] * fac
-                    accE_scaled = dataE["acc_unit"] * fac
+                    accN_processed = dataN["acc_unit"] * fac
+                    accE_processed = dataE["acc_unit"] * fac
 
-                    nameN = Path(dataN["file_name"]).stem + f"_ESC_FAC_{fac:.4f}.txt"
-                    nameE = Path(dataE["file_name"]).stem + f"_ESC_FAC_{fac:.4f}.txt"
+                    if already_scaled:
+                        suffix = "_PROCESADO_FAC_1p0000.txt"
+                    else:
+                        suffix = f"_ESC_FAC_{fac:.4f}.txt"
 
-                    zf.writestr(nameN, make_scaled_txt(dataN["time"], accN_scaled))
-                    zf.writestr(nameE, make_scaled_txt(dataE["time"], accE_scaled))
+                    nameN = Path(dataN["file_name"]).stem + suffix
+                    nameE = Path(dataE["file_name"]).stem + suffix
+
+                    zf.writestr(nameN, make_scaled_txt(dataN["time"], accN_processed))
+                    zf.writestr(nameE, make_scaled_txt(dataE["time"], accE_processed))
+
+            zip_name = "acelerogramas_procesados_fac_1.zip" if already_scaled else "acelerogramas_escalados_pares_srss.zip"
 
             st.download_button(
-                "Descargar acelerogramas escalados ZIP",
+                "Descargar acelerogramas procesados ZIP",
                 data=zip_buffer.getvalue(),
-                file_name="acelerogramas_escalados_pares_srss.zip",
+                file_name=zip_name,
                 mime="application/zip"
             )
 
         with st.expander("Formato esperado del espectro objetivo"):
             st.markdown(
                 """
+Solo se solicita cuando **Mis registros ya están escalados** está desactivado.
+
 El archivo del espectro objetivo debe tener dos columnas:
 
 ```text
@@ -895,9 +950,6 @@ T      Sa
 1.00   1.30
 2.00   0.65
 ```
-
-- Columna 1: período `T` en segundos.
-- Columna 2: aceleración espectral `Sa` en `g`.
 """
             )
 
@@ -916,7 +968,7 @@ Luego se calcula la media:
 \overline{Sa}_{SRSS}(T)=\frac{1}{n}\sum_{i=1}^{n}Sa_{SRSS,i}(T)
 \]
 
-Para el factor global:
+Si los registros **no están escalados**, se puede calcular:
 
 \[
 FAC=\max\left(\frac{Sa_{objetivo}(T)}{\overline{Sa}_{SRSS}(T)}\right)
@@ -928,18 +980,20 @@ dentro del rango:
 0.2T_1 \leq T \leq 1.5T_1
 \]
 
-Si escoges criterio 90%, el numerador se cambia a:
+Si los registros **ya están escalados**, se usa:
 
 \[
-0.90 \cdot Sa_{objetivo}(T)
+FAC=1.0
 \]
+
+y se omite el espectro objetivo.
 """
             )
 
     except Exception as e:
         st.error(f"Error durante el procesamiento: {e}")
 
-elif uploaded_records and not uploaded_objective:
-    st.info("Ahora sube el espectro objetivo para calcular el escalamiento.")
+elif uploaded_records and not already_scaled and uploaded_objective is None:
+    st.info("Sube el espectro objetivo o activa 'Mis registros ya están escalados'.")
 else:
-    st.warning("Sube los registros N/E y el espectro objetivo para iniciar.")
+    st.warning("Sube los registros N/E para iniciar.")

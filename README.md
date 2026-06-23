@@ -1,21 +1,32 @@
 
-# Escalamiento de pares N/E por media SRSS
+# Escalamiento de pares N/E por media SRSS - versión 2
 
-Esta aplicación replica el procedimiento típico hecho en Excel:
+Esta versión permite dos modos:
 
-1. Subir todos los acelerogramas N/E.
-2. Detectar pares automáticamente por terminación `_N` y `_E`.
-3. Calcular espectros de aceleración Sa para cada componente.
-4. Combinar cada par con SRSS.
-5. Calcular la media SRSS.
-6. Comparar la media SRSS con un espectro objetivo dentro de 0.2T1–1.5T1.
-7. Calcular factor de escala.
-8. Graficar:
-   - Espectro objetivo
-   - Media SRSS original
-   - Media SRSS escalada
-   - Líneas T1, 0.2T1 y 1.5T1
-9. Descargar acelerogramas escalados.
+## 1. Registros sin escalar
+
+- Subes registros N/E.
+- Subes espectro objetivo T-Sa.
+- Calcula SRSS.
+- Calcula media SRSS.
+- Calcula factor de escala.
+- Genera acelerogramas escalados.
+
+## 2. Registros ya escalados
+
+Activa:
+
+```text
+Mis registros ya están escalados
+```
+
+En ese modo:
+
+- No se solicita espectro objetivo.
+- No se calcula factor de escala.
+- Se usa factor = 1.0.
+- Se calculan espectros, SRSS y media SRSS directamente.
+- Se grafica la media SRSS de los registros ya escalados.
 
 ## Ejecutar
 
@@ -24,25 +35,18 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Nombre de archivos
+## Nombres de archivos
 
-Los archivos deben terminar en `_N` y `_E`, por ejemplo:
+Los pares se detectan con terminaciones:
+
+```text
+_N
+_E
+```
+
+Ejemplo:
 
 ```text
 RSN4031_SANSIMEO_36695090_N.txt
 RSN4031_SANSIMEO_36695090_E.txt
 ```
-
-## Espectro objetivo
-
-Debe tener dos columnas:
-
-```text
-T Sa
-0.01 0.80
-0.10 1.75
-0.50 1.75
-1.00 1.30
-```
-
-Sin encabezado o con encabezado numérico no importa; la app usa las primeras dos columnas numéricas.
