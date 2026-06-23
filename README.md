@@ -1,20 +1,21 @@
-# Streamlit - Curvas de fragilidad con Sa o Sd
 
-## Funciones principales
+# Escalamiento de pares N/E por media SRSS
 
-Esta versión permite:
+Esta aplicación replica el procedimiento típico hecho en Excel:
 
-1. Subir acelerogramas.
-2. Calcular Sa(T) y Sd(T).
-3. Elegir la medida de intensidad:
-   - Sa(T) en g
-   - Sd(T) en cm
-4. Escalar registros a varios niveles objetivo de Sa o Sd.
-5. Graficar espectros de respuesta:
-   - Espectro de aceleración Sa
-   - Espectro de desplazamiento Sd
-6. Escoger qué registros ver en las gráficas.
-7. Generar curvas de fragilidad lognormales.
+1. Subir todos los acelerogramas N/E.
+2. Detectar pares automáticamente por terminación `_N` y `_E`.
+3. Calcular espectros de aceleración Sa para cada componente.
+4. Combinar cada par con SRSS.
+5. Calcular la media SRSS.
+6. Comparar la media SRSS con un espectro objetivo dentro de 0.2T1–1.5T1.
+7. Calcular factor de escala.
+8. Graficar:
+   - Espectro objetivo
+   - Media SRSS original
+   - Media SRSS escalada
+   - Líneas T1, 0.2T1 y 1.5T1
+9. Descargar acelerogramas escalados.
 
 ## Ejecutar
 
@@ -23,6 +24,25 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Nota técnica
+## Nombre de archivos
 
-Esta versión define estados de daño con límites de Sa o Sd. Para curvas estructurales más rigurosas, se recomienda usar derivas máximas de entrepiso.
+Los archivos deben terminar en `_N` y `_E`, por ejemplo:
+
+```text
+RSN4031_SANSIMEO_36695090_N.txt
+RSN4031_SANSIMEO_36695090_E.txt
+```
+
+## Espectro objetivo
+
+Debe tener dos columnas:
+
+```text
+T Sa
+0.01 0.80
+0.10 1.75
+0.50 1.75
+1.00 1.30
+```
+
+Sin encabezado o con encabezado numérico no importa; la app usa las primeras dos columnas numéricas.
