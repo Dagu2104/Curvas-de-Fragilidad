@@ -1,6 +1,8 @@
-
 import io
 import re
+import zipfile
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -11,46 +13,14 @@ from scipy.stats import norm
 G = 9.80665
 
 
-# ============================================================
-# LECTURA INTELIGENTE DE ACELEROGRAMAS
-# ============================================================
 def read_accel_file(uploaded_file):
-    """
-    Lee un acelerograma .txt/.csv.
-
-    Casos aceptados:
-
-    1) Una columna:
-       aceleracion
-
-    2) Dos columnas:
-       tiempo    aceleracion
-
-    3) Más columnas:
-       toma columna 1 como tiempo y columna 2 como aceleración,
-       si la primera columna parece ser tiempo creciente.
-
-    Retorna:
-       time_array, accel_array, dt_detected, formato_detectado
-    """
-
     raw = uploaded_file.read()
     text = raw.decode("utf-8", errors="ignore")
-
-    # Reemplaza coma decimal por punto, si existe.
     text = re.sub(r"(?<=\d),(?=\d)", ".", text)
 
-    df = pd.read_csv(
-        io.StringIO(text),
-        sep=r"[\s,;]+",
-        engine="python",
-        header=None,
-        comment="#"
-    )
-
+    df = pd.read_csv(io.StringIO(text), sep=r"[\s,;]+", engine="python", header=None, comment="#")
     df = df.apply(pd.to_numeric, errors="coerce")
-    df = df.dropna(axis=1, how="all")
-    df = df.dropna(axis=0, how="all")
+    df = df.dropna(axis=1, how="all").dropna(axis=0, how="all")
 
     if df.empty:
         raise ValueError("No se encontraron datos numéricos.")
@@ -61,58 +31,39 @@ def read_accel_file(uploaded_file):
         if len(values) > 10:
             numeric_cols.append(col)
 
-    if len(numeric_cols) == 0:
+    if not numeric_cols:
         raise ValueError("No hay columnas numéricas suficientes.")
 
-    # Caso de una sola columna: solo aceleración
     if len(numeric_cols) == 1:
         acc = df[numeric_cols[0]].dropna().to_numpy(dtype=float)
         return None, acc, None, "Una columna: aceleración"
 
-    # Caso de dos o más columnas
-    col0 = numeric_cols[0]
-    col1 = numeric_cols[1]
-
-    x0 = df[col0].dropna().to_numpy(dtype=float)
-    x1 = df[col1].dropna().to_numpy(dtype=float)
-
+    x0 = df[numeric_cols[0]].dropna().to_numpy(dtype=float)
+    x1 = df[numeric_cols[1]].dropna().to_numpy(dtype=float)
     n = min(len(x0), len(x1))
     x0 = x0[:n]
     x1 = x1[:n]
 
-    # Detectar si la primera columna es tiempo:
-    # - debe ser creciente
-    # - debe tener incrementos casi constantes
     diffs = np.diff(x0)
     positive_ratio = np.mean(diffs > 0)
     dt_median = np.median(diffs)
 
     if positive_ratio > 0.95 and dt_median > 0:
-        time = x0
-        acc = x1
-        dt_detected = float(dt_median)
-        return time, acc, dt_detected, "Dos columnas: tiempo + aceleración"
+        return x0, x1, float(dt_median), "Dos columnas: tiempo + aceleración"
 
-    # Si no parece tiempo, toma segunda columna como aceleración igual,
-    # porque en registros PEER/RSN suele venir tiempo + aceleración.
-    acc = x1
-    return None, acc, None, "Varias columnas: se usó la segunda columna como aceleración"
+    return None, x1, None, "Varias columnas: se usó segunda columna como aceleración"
 
 
 def convert_to_m_s2(accel, unit):
     if unit == "g":
         return accel * G
-    elif unit == "m/s²":
+    if unit == "m/s²":
         return accel
-    elif unit == "cm/s²":
+    if unit == "cm/s²":
         return accel / 100.0
-    else:
-        raise ValueError("Unidad no reconocida.")
+    raise ValueError("Unidad no reconocida.")
 
 
-# ============================================================
-# CÁLCULO DE Sa(T) CON NEWMARK BETA
-# ============================================================
 def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
     if period <= 0:
         raise ValueError("El período debe ser mayor que cero.")
@@ -125,7 +76,6 @@ def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
     w = 2.0 * np.pi / period
     k = m * w**2
     c = 2.0 * damping * m * w
-
     beta = 1.0 / 4.0
     gamma = 1.0 / 2.0
 
@@ -143,43 +93,34 @@ def spectral_acceleration_newmark(acc_g_m_s2, dt, period, damping=0.05):
     a3 = 1.0 / (2.0 * beta) - 1.0
     a4 = gamma / beta - 1.0
     a5 = dt * (gamma / (2.0 * beta) - 1.0)
-
     k_eff = k + a0 * m + a1 * c
 
     for i in range(1, n):
         p_eff = (
             p[i]
-            + m * (a0 * u[i-1] + a2 * v[i-1] + a3 * a[i-1])
-            + c * (a1 * u[i-1] + a4 * v[i-1] + a5 * a[i-1])
+            + m * (a0 * u[i - 1] + a2 * v[i - 1] + a3 * a[i - 1])
+            + c * (a1 * u[i - 1] + a4 * v[i - 1] + a5 * a[i - 1])
         )
-
         u[i] = p_eff / k_eff
-        a[i] = a0 * (u[i] - u[i-1]) - a2 * v[i-1] - a3 * a[i-1]
-        v[i] = v[i-1] + dt * ((1.0 - gamma) * a[i-1] + gamma * a[i])
+        a[i] = a0 * (u[i] - u[i - 1]) - a2 * v[i - 1] - a3 * a[i - 1]
+        v[i] = v[i - 1] + dt * ((1.0 - gamma) * a[i - 1] + gamma * a[i])
 
     sd = np.max(np.abs(u))
     psa_m_s2 = w**2 * sd
-    psa_g = psa_m_s2 / G
-
-    return float(psa_g)
+    return float(psa_m_s2 / G)
 
 
-# ============================================================
-# FRAGILIDAD LOGNORMAL
-# ============================================================
 def fit_lognormal_fragility(im_values, exceedance):
     im_values = np.asarray(im_values, dtype=float)
     y = np.asarray(exceedance, dtype=int)
-
     mask = np.isfinite(im_values) & (im_values > 0) & np.isfinite(y)
     im_values = im_values[mask]
     y = y[mask]
 
-    if len(im_values) < 3:
-        return None, None, "Se necesitan más registros."
-
+    if len(im_values) < 4:
+        return None, None, "Se necesitan más puntos."
     if len(np.unique(y)) < 2:
-        return None, None, "No se puede ajustar: todos los registros están del mismo lado del estado de daño."
+        return None, None, "No se puede ajustar: todos los puntos son 0 o todos son 1."
 
     def neg_loglike(params):
         ln_theta, ln_beta = params
@@ -195,288 +136,258 @@ def fit_lognormal_fragility(im_values, exceedance):
     if not res.success:
         return None, None, "No se pudo ajustar."
 
-    theta = float(np.exp(res.x[0]))
-    beta = float(np.exp(res.x[1]))
-
-    return theta, beta, "OK"
+    return float(np.exp(res.x[0])), float(np.exp(res.x[1])), "OK"
 
 
 def fragility_probability(im_grid, theta, beta):
     return norm.cdf((np.log(im_grid) - np.log(theta)) / beta)
 
 
-# ============================================================
-# INTERFAZ STREAMLIT
-# ============================================================
-st.set_page_config(
-    page_title="Curvas de Fragilidad Sísmica",
-    page_icon="📈",
-    layout="wide"
-)
+def parse_sa_targets(text):
+    text = text.replace(";", ",")
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    values = []
+    for p in parts:
+        try:
+            val = float(p)
+            if val > 0:
+                values.append(val)
+        except ValueError:
+            pass
+    return sorted(list(set(values)))
 
-st.title("📈 Curvas de fragilidad sísmica con registros en una dirección")
 
-st.markdown(
-    """
-Sube registros sísmicos `.txt` o `.csv`.  
-El programa detecta automáticamente si el archivo viene como:
+def make_scaled_txt(time, accel_scaled_original_unit):
+    if time is not None:
+        return "\n".join(f"{t:.6f}\t{a:.8e}" for t, a in zip(time, accel_scaled_original_unit))
+    return "\n".join(f"{a:.8e}" for a in accel_scaled_original_unit)
 
-- **una columna:** aceleración
-- **dos columnas:** tiempo + aceleración
 
-Si detecta columna de tiempo, calcula automáticamente el `dt`.
-"""
-)
+st.set_page_config(page_title="Fragilidad con Escalamiento Sa", page_icon="📈", layout="wide")
+st.title("📈 Curvas de fragilidad con escalamiento a Sa objetivo")
+
+st.markdown(r"""
+Esta versión permite subir acelerogramas, calcular su **Sa(T)** y escalarlos a varios niveles de **Sa objetivo**.
+
+El factor de escala es:
+
+$$FE = \frac{Sa_{objetivo}}{Sa_{registro}(T)}$$
+
+Luego:
+
+$$a_{escalado}(t)=FE \cdot a_{original}(t)$$
+""")
 
 with st.sidebar:
-    st.header("Datos de la estructura")
+    st.header("1. Estructura")
+    period = st.number_input("Período T (s)", min_value=0.01, value=0.50, step=0.01, format="%.3f")
+    damping = st.number_input("Amortiguamiento ξ", min_value=0.00, max_value=0.30, value=0.05, step=0.01, format="%.3f")
 
-    period = st.number_input(
-        "Período de la estructura, T (s)",
-        min_value=0.01,
-        value=0.50,
-        step=0.01,
-        format="%.3f"
+    st.header("2. Registro")
+    dt_manual = st.number_input("dt manual si el archivo tiene una columna (s)", min_value=0.0001, value=0.005, step=0.001, format="%.4f")
+    unit = st.selectbox("Unidad de aceleración en los archivos", ["g", "m/s²", "cm/s²"])
+
+    st.header("3. Sa objetivo")
+    sa_targets_text = st.text_area(
+        "Niveles de Sa objetivo en g, separados por coma",
+        value="0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00, 1.20",
+        height=100,
     )
 
-    damping = st.number_input(
-        "Amortiguamiento ξ",
-        min_value=0.00,
-        max_value=0.30,
-        value=0.05,
-        step=0.01,
-        format="%.3f"
-    )
-
-    st.header("Datos del registro")
-
-    dt_manual = st.number_input(
-        "dt manual, solo si el archivo tiene una columna (s)",
-        min_value=0.0001,
-        value=0.005,
-        step=0.001,
-        format="%.4f"
-    )
-
-    unit = st.selectbox(
-        "Unidad de aceleración en los archivos",
-        ["g", "m/s²", "cm/s²"]
-    )
-
-    st.divider()
-
-    st.header("Estados de daño")
-    st.caption("Límites en función de Sa(T), en g.")
-
+    st.header("4. Límites de daño")
+    st.caption("Versión simplificada: el daño se define con límites de Sa(T).")
     ds_leve = st.number_input("Daño leve: Sa ≥", min_value=0.001, value=0.15, step=0.01, format="%.3f")
     ds_moderado = st.number_input("Daño moderado: Sa ≥", min_value=0.001, value=0.30, step=0.01, format="%.3f")
     ds_severo = st.number_input("Daño severo: Sa ≥", min_value=0.001, value=0.50, step=0.01, format="%.3f")
     ds_colapso = st.number_input("Colapso: Sa ≥", min_value=0.001, value=0.80, step=0.01, format="%.3f")
 
+    st.header("5. Archivos escalados")
+    generar_zip = st.checkbox("Generar ZIP con acelerogramas escalados", value=False)
 
-uploaded_files = st.file_uploader(
-    "Sube acelerogramas de una sola dirección",
-    type=["txt", "csv"],
-    accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Sube acelerogramas de una sola dirección", type=["txt", "csv"], accept_multiple_files=True)
+sa_targets = parse_sa_targets(sa_targets_text)
 
+if not sa_targets:
+    st.error("Ingresa al menos un Sa objetivo válido. Ejemplo: 0.10, 0.20, 0.30")
 
-if uploaded_files:
-    results = []
+if uploaded_files and sa_targets:
+    original_rows = []
+    scaled_rows = []
+    scaled_files = {}
     progress = st.progress(0, text="Procesando registros...")
 
     for i, file in enumerate(uploaded_files):
         try:
-            time, accel_raw, dt_detected, formato = read_accel_file(file)
+            time, accel_raw_original_unit, dt_detected, formato = read_accel_file(file)
+            dt_usado = dt_detected if dt_detected is not None else dt_manual
+            accel_original_m_s2 = convert_to_m_s2(accel_raw_original_unit, unit)
+            pga_original_g = np.max(np.abs(accel_original_m_s2)) / G
+            sa_original_g = spectral_acceleration_newmark(accel_original_m_s2, dt=dt_usado, period=period, damping=damping)
 
-            if dt_detected is not None:
-                dt_usado = dt_detected
-            else:
-                dt_usado = dt_manual
-
-            accel_m_s2 = convert_to_m_s2(accel_raw, unit)
-
-            pga_g = np.max(np.abs(accel_m_s2)) / G
-
-            sa_g = spectral_acceleration_newmark(
-                accel_m_s2,
-                dt=dt_usado,
-                period=period,
-                damping=damping
-            )
-
-            results.append({
+            original_rows.append({
                 "Registro": file.name,
                 "Formato detectado": formato,
-                "Puntos": len(accel_raw),
+                "Puntos": len(accel_raw_original_unit),
                 "dt usado (s)": dt_usado,
-                "Acel. mín": np.min(accel_raw),
-                "Acel. máx": np.max(accel_raw),
-                "PGA (g)": pga_g,
-                f"Sa(T={period:.3f}s) (g)": sa_g,
-                "DS leve": int(sa_g >= ds_leve),
-                "DS moderado": int(sa_g >= ds_moderado),
-                "DS severo": int(sa_g >= ds_severo),
-                "DS colapso": int(sa_g >= ds_colapso),
-                "Error": ""
+                "Acel. mín original": np.min(accel_raw_original_unit),
+                "Acel. máx original": np.max(accel_raw_original_unit),
+                "PGA original (g)": pga_original_g,
+                f"Sa original T={period:.3f}s (g)": sa_original_g,
+                "Error": "",
             })
 
+            if sa_original_g <= 0:
+                raise ValueError("Sa original es cero o negativa. No se puede escalar.")
+
+            for sa_obj in sa_targets:
+                factor = sa_obj / sa_original_g
+                accel_scaled_original_unit = accel_raw_original_unit * factor
+                pga_scaled_g = pga_original_g * factor
+                sa_scaled_g = sa_original_g * factor
+
+                scaled_rows.append({
+                    "Registro": file.name,
+                    "Sa objetivo (g)": sa_obj,
+                    "Factor escala": factor,
+                    "PGA escalado (g)": pga_scaled_g,
+                    f"Sa escalado T={period:.3f}s (g)": sa_scaled_g,
+                    "DS leve": int(sa_scaled_g >= ds_leve),
+                    "DS moderado": int(sa_scaled_g >= ds_moderado),
+                    "DS severo": int(sa_scaled_g >= ds_severo),
+                    "DS colapso": int(sa_scaled_g >= ds_colapso),
+                })
+
+                if generar_zip:
+                    stem = Path(file.name).stem
+                    safe_sa = str(sa_obj).replace(".", "p")
+                    out_name = f"{stem}_SaObj_{safe_sa}g_FE_{factor:.4f}.txt"
+                    scaled_files[out_name] = make_scaled_txt(time, accel_scaled_original_unit)
+
         except Exception as e:
-            results.append({
+            original_rows.append({
                 "Registro": file.name,
                 "Formato detectado": "",
                 "Puntos": None,
                 "dt usado (s)": None,
-                "Acel. mín": None,
-                "Acel. máx": None,
-                "PGA (g)": None,
-                f"Sa(T={period:.3f}s) (g)": None,
-                "DS leve": None,
-                "DS moderado": None,
-                "DS severo": None,
-                "DS colapso": None,
-                "Error": str(e)
+                "Acel. mín original": None,
+                "Acel. máx original": None,
+                "PGA original (g)": None,
+                f"Sa original T={period:.3f}s (g)": None,
+                "Error": str(e),
             })
 
         progress.progress((i + 1) / len(uploaded_files), text=f"Procesando {i+1}/{len(uploaded_files)}")
 
     progress.empty()
 
-    df = pd.DataFrame(results)
+    df_original = pd.DataFrame(original_rows)
+    df_scaled = pd.DataFrame(scaled_rows)
 
-    st.subheader("Resultados por registro")
-    st.dataframe(df, use_container_width=True)
+    st.subheader("1. Registros originales")
+    st.dataframe(df_original, use_container_width=True)
 
-    sa_col = f"Sa(T={period:.3f}s) (g)"
-    valid_df = df.dropna(subset=[sa_col]).copy()
+    st.subheader("2. Puntos generados por escalamiento")
+    st.dataframe(df_scaled, use_container_width=True)
 
-    if not valid_df.empty:
-        csv_data = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Descargar resultados CSV",
-            data=csv_data,
-            file_name="resultados_fragilidad.csv",
-            mime="text/csv"
-        )
+    if not df_scaled.empty:
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.download_button("Descargar originales CSV", data=df_original.to_csv(index=False).encode("utf-8"), file_name="registros_originales.csv", mime="text/csv")
+        with col_b:
+            st.download_button("Descargar puntos escalados CSV", data=df_scaled.to_csv(index=False).encode("utf-8"), file_name="puntos_escalados_fragilidad.csv", mime="text/csv")
 
-        col1, col2 = st.columns(2)
+        if generar_zip and scaled_files:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for name, txt in scaled_files.items():
+                    zf.writestr(name, txt)
+            with col_c:
+                st.download_button("Descargar acelerogramas escalados ZIP", data=zip_buffer.getvalue(), file_name="acelerogramas_escalados.zip", mime="application/zip")
 
-        with col1:
-            st.subheader("Sa(T) por registro")
-            fig_sa = go.Figure()
-            fig_sa.add_trace(go.Bar(
-                x=valid_df["Registro"],
-                y=valid_df[sa_col],
-                name="Sa(T)"
-            ))
-            fig_sa.update_layout(
-                xaxis_title="Registro",
-                yaxis_title="Sa(T) [g]",
-                xaxis_tickangle=-45
-            )
-            st.plotly_chart(fig_sa, use_container_width=True)
+        sa_scaled_col = f"Sa escalado T={period:.3f}s (g)"
 
-        with col2:
-            st.subheader("PGA vs Sa(T)")
-            fig_scatter = go.Figure()
-            fig_scatter.add_trace(go.Scatter(
-                x=valid_df["PGA (g)"],
-                y=valid_df[sa_col],
-                mode="markers+text",
-                text=valid_df["Registro"],
-                textposition="top center"
-            ))
-            fig_scatter.update_layout(
-                xaxis_title="PGA [g]",
-                yaxis_title="Sa(T) [g]"
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+        st.subheader("3. PGA escalado vs Sa objetivo")
+        fig_points = go.Figure()
+        fig_points.add_trace(go.Scatter(x=df_scaled["Sa objetivo (g)"], y=df_scaled["PGA escalado (g)"], mode="markers", text=df_scaled["Registro"], name="Puntos escalados"))
+        fig_points.update_layout(xaxis_title="Sa objetivo = Sa(T) escalado [g]", yaxis_title="PGA escalado [g]")
+        st.plotly_chart(fig_points, use_container_width=True)
 
-        st.subheader("Curvas de fragilidad")
-
-        im_values = valid_df[sa_col].to_numpy(dtype=float)
-
+        st.subheader("4. Curvas de fragilidad")
+        im_values = df_scaled[sa_scaled_col].to_numpy(dtype=float)
         damage_states = {
-            "Leve": valid_df["DS leve"].to_numpy(dtype=int),
-            "Moderado": valid_df["DS moderado"].to_numpy(dtype=int),
-            "Severo": valid_df["DS severo"].to_numpy(dtype=int),
-            "Colapso": valid_df["DS colapso"].to_numpy(dtype=int),
+            "Leve": df_scaled["DS leve"].to_numpy(dtype=int),
+            "Moderado": df_scaled["DS moderado"].to_numpy(dtype=int),
+            "Severo": df_scaled["DS severo"].to_numpy(dtype=int),
+            "Colapso": df_scaled["DS colapso"].to_numpy(dtype=int),
         }
 
-        im_min = max(0.001, np.min(im_values) * 0.50)
-        im_max = max(np.max(im_values) * 1.80, ds_colapso * 1.50)
-        im_grid = np.linspace(im_min, im_max, 300)
-
+        im_min = max(0.001, min(sa_targets) * 0.50)
+        im_max = max(max(sa_targets) * 1.30, ds_colapso * 1.30)
+        im_grid = np.linspace(im_min, im_max, 400)
         fig_frag = go.Figure()
         fit_rows = []
 
         for ds_name, exceedance in damage_states.items():
             theta, beta, status = fit_lognormal_fragility(im_values, exceedance)
-
+            zeros = int(np.sum(exceedance == 0))
+            ones = int(np.sum(exceedance == 1))
             if theta is not None:
                 prob = fragility_probability(im_grid, theta, beta)
-                fig_frag.add_trace(go.Scatter(
-                    x=im_grid,
-                    y=prob,
-                    mode="lines",
-                    name=f"DS {ds_name}"
-                ))
-
+                fig_frag.add_trace(go.Scatter(x=im_grid, y=prob, mode="lines", name=f"DS {ds_name}"))
             fit_rows.append({
                 "Estado de daño": ds_name,
+                "Cantidad 0": zeros,
+                "Cantidad 1": ones,
                 "θ / mediana Sa (g)": theta,
                 "β / dispersión lognormal": beta,
-                "Estado": status
+                "Estado ajuste": status,
             })
 
-        fig_frag.update_layout(
-            xaxis_title="IM = Sa(T) [g]",
-            yaxis_title="P(DS ≥ ds | Sa)",
-            yaxis=dict(range=[0, 1]),
-            legend_title="Curvas"
-        )
-
+        fig_frag.update_layout(xaxis_title="IM = Sa(T) escalado [g]", yaxis_title="P(DS ≥ ds | Sa)", yaxis=dict(range=[0, 1]), legend_title="Curvas")
         st.plotly_chart(fig_frag, use_container_width=True)
 
-        st.subheader("Parámetros ajustados")
+        st.subheader("5. Parámetros ajustados")
         st.dataframe(pd.DataFrame(fit_rows), use_container_width=True)
 
-        st.info(
-            """
-Revisa las columnas **Acel. mín**, **Acel. máx**, **PGA** y **dt usado**.
-Si tu registro está en g, los valores de PGA deberían estar en un rango razonable, por ejemplo 0.01 g a 2 g,
-dependiendo del registro. Si sale 100 g, todavía se está leyendo mal el archivo.
-"""
-        )
-
+        st.warning("""
+Importante: esta versión genera más puntos al escalar los acelerogramas, pero el daño todavía se define con límites de Sa.
+Para una curva de fragilidad estructural más realista, debes usar la respuesta de la estructura: deriva máxima, desplazamiento de techo, rotaciones plásticas o daño de elementos.
+""")
 else:
-    st.warning("Sube uno o varios acelerogramas para iniciar.")
+    st.warning("Sube registros y define niveles de Sa objetivo para iniciar.")
 
+with st.expander("¿Cómo usar esta versión?"):
+    st.markdown(r"""
+Ejemplo:
 
-with st.expander("Formato recomendado"):
-    st.markdown(
-        """
-Formato de dos columnas recomendado:
-
-```txt
-0.000000    2.177299e-04
-0.005000    2.177415e-04
-0.010000    2.177215e-04
+```text
+0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.80, 1.00
 ```
 
-En ese caso:
+Si subes 11 registros:
 
-- columna 1 = tiempo
-- columna 2 = aceleración
-
-Formato de una columna aceptado:
-
-```txt
-2.177299e-04
-2.177415e-04
-2.177215e-04
+```text
+11 registros × 8 Sa objetivo = 88 puntos
 ```
 
-En ese caso debes ingresar manualmente el `dt`.
-"""
-    )
+Cada punto tiene registro original, Sa objetivo, factor de escala, PGA escalado y estado de daño.
+""")
+
+with st.expander("Advertencia técnica importante"):
+    st.markdown("""
+Esta app todavía no reemplaza un análisis dinámico no lineal.
+
+Para una curva de fragilidad más seria, el flujo debería ser:
+
+```text
+Registro original
+→ escalamiento a Sa objetivo
+→ análisis estructural tiempo-historia
+→ obtención de deriva máxima
+→ comparación con límites de daño por deriva
+→ ajuste de curva lognormal
+```
+
+En esta versión simplificada, el estado de daño se decide directamente por Sa(T).
+Eso sirve para probar el procedimiento y automatizar el escalamiento, pero no representa por sí solo el daño real de la estructura.
+""")

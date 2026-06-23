@@ -1,26 +1,36 @@
-# Streamlit - Curvas de fragilidad sísmica
+# Streamlit - Curvas de fragilidad con escalamiento a Sa objetivo
 
-Versión corregida.
+## Qué hace esta versión
 
-## Corrección principal
+Permite:
 
-La versión anterior tomaba la primera columna del archivo como aceleración.  
-Pero muchos acelerogramas vienen con dos columnas:
+1. Subir acelerogramas.
+2. Calcular Sa(T) original.
+3. Ingresar varios niveles de Sa objetivo.
+4. Escalar cada registro a cada Sa objetivo.
+5. Generar varios puntos para curvas de fragilidad.
+6. Descargar tablas CSV.
+7. Opcionalmente descargar los acelerogramas escalados en ZIP.
 
-- columna 1: tiempo
-- columna 2: aceleración
-
-Esta versión detecta eso y usa correctamente la segunda columna como aceleración.
-
-## Ejecutar
+## Ejecución
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Archivos
+## Factor de escala
 
-- app.py
-- requirements.txt
-- README.md
+```text
+FE = Sa_objetivo / Sa_original(T)
+```
+
+El acelerograma escalado es:
+
+```text
+a_escalado(t) = FE * a_original(t)
+```
+
+## Nota técnica
+
+La versión actual define estados de daño con límites de Sa. Para curvas estructurales más rigurosas se debe usar respuesta estructural como deriva máxima.
