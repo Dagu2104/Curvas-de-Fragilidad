@@ -1,32 +1,14 @@
 
-# Escalamiento de pares N/E por media SRSS - versión 2
+# SRSS + Numba + Curvas de fragilidad
 
-Esta versión permite dos modos:
+## Qué hace
 
-## 1. Registros sin escalar
-
-- Subes registros N/E.
-- Subes espectro objetivo T-Sa.
-- Calcula SRSS.
-- Calcula media SRSS.
-- Calcula factor de escala.
-- Genera acelerogramas escalados.
-
-## 2. Registros ya escalados
-
-Activa:
-
-```text
-Mis registros ya están escalados
-```
-
-En ese modo:
-
-- No se solicita espectro objetivo.
-- No se calcula factor de escala.
-- Se usa factor = 1.0.
-- Se calculan espectros, SRSS y media SRSS directamente.
-- Se grafica la media SRSS de los registros ya escalados.
+1. Lee pares N/E.
+2. Calcula espectros Sa.
+3. Combina pares mediante SRSS.
+4. Permite usar registros ya escalados o escalar contra espectro objetivo.
+5. Acelera el cálculo de espectros con Numba.
+6. Genera curvas de fragilidad usando derivas máximas.
 
 ## Ejecutar
 
@@ -35,18 +17,25 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Nombres de archivos
+## Tabla de derivas
 
-Los pares se detectan con terminaciones:
-
-```text
-_N
-_E
-```
-
-Ejemplo:
+Formato recomendado:
 
 ```text
-RSN4031_SANSIMEO_36695090_N.txt
-RSN4031_SANSIMEO_36695090_E.txt
+Par,Deriva_maxima_%
+1_RSN730,0.45
+1_RSN755,0.82
+1_RSN767,1.35
 ```
+
+La columna `Par` debe coincidir con los nombres detectados por la app.
+
+## Intensidad para fragilidad
+
+La app usa:
+
+```text
+IM = SRSS(T1) final [g]
+```
+
+y compara la deriva máxima con límites DS1, DS2, DS3 y DS4.

@@ -8,8 +8,27 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from scipy.optimize import minimize
+from scipy.stats import norm
 
 G = 9.80665
+
+# ============================================================
+# NUMBA OPCIONAL
+# ============================================================
+try:
+    from numba import njit, prange
+    NUMBA_AVAILABLE = True
+except Exception:
+    NUMBA_AVAILABLE = False
+
+    def njit(*args, **kwargs):
+        def wrapper(func):
+            return func
+        return wrapper
+
+    def prange(*args, **kwargs):
+        return range(*args)
 
 
 # ============================================================
@@ -125,6 +144,63 @@ def read_objective_spectrum(uploaded_file):
     return out
 
 
+def read_drift_file(uploaded_file):
+    """
+    Lee archivo de derivas.
+
+    Formato esperado:
+    Par,Deriva_maxima_%
+
+    También acepta dos columnas sin encabezado:
+    columna 1 = Par
+    columna 2 = deriva máxima en %
+    """
+    uploaded_file.seek(0)
+    raw = uploaded_file.read()
+    text = raw.decode("utf-8", errors="ignore")
+    text = re.sub(r"(?<=\d),(?=\d)", ".", text)
+
+    # Primero intenta con encabezado
+    try:
+        df = pd.read_csv(io.StringIO(text), sep=None, engine="python")
+    except Exception:
+        df = pd.read_csv(io.StringIO(text), sep=r"[\s,;]+", engine="python", header=None)
+
+    if df.shape[1] < 2:
+        raise ValueError("El archivo de derivas debe tener al menos dos columnas: Par y Deriva_maxima_%.")
+
+    # Detectar columnas
+    cols_lower = [str(c).strip().lower() for c in df.columns]
+
+    par_col = None
+    drift_col = None
+
+    for c, cl in zip(df.columns, cols_lower):
+        if cl in ["par", "registro", "id", "nombre"] or "par" in cl or "registro" in cl:
+            par_col = c
+        if "deriva" in cl or "drift" in cl or "idr" in cl:
+            drift_col = c
+
+    if par_col is None:
+        par_col = df.columns[0]
+
+    if drift_col is None:
+        drift_col = df.columns[1]
+
+    out = pd.DataFrame({
+        "Par": df[par_col].astype(str).str.strip(),
+        "Deriva_maxima_%": pd.to_numeric(df[drift_col], errors="coerce")
+    })
+
+    out = out.dropna(subset=["Par", "Deriva_maxima_%"])
+    out = out[out["Par"] != ""]
+
+    if out.empty:
+        raise ValueError("No se encontraron derivas válidas.")
+
+    return out
+
+
 def convert_to_m_s2(accel, unit):
     if unit == "g":
         return accel * G
@@ -153,13 +229,10 @@ def detect_direction_and_base(filename):
     Ejemplos:
     1_RSN730_SPITAK_GUK000_N.txt  -> base: 1_RSN730, dir: N
     1_RSN730_SPITAK_GUK090_E.txt  -> base: 1_RSN730, dir: E
-
-    Esto evita que GUK000 y GUK090 se traten como registros diferentes.
     """
 
     stem = Path(filename).stem.strip()
 
-    # Detectar dirección al final: _N, _E, -N, -E
     m_dir = re.search(r"[_\-\s]+([NE])$", stem, flags=re.IGNORECASE)
 
     if not m_dir:
@@ -167,10 +240,8 @@ def detect_direction_and_base(filename):
 
     direction = m_dir.group(1).upper()
 
-    # Quitar la dirección final
     stem_no_dir = re.sub(r"[_\-\s]+[NE]$", "", stem, flags=re.IGNORECASE)
 
-    # Conservar prefijo numérico si existe, por ejemplo: 1_RSN730...
     prefix = ""
     rest = stem_no_dir
 
@@ -180,15 +251,12 @@ def detect_direction_and_base(filename):
         prefix = m_prefix.group(1)
         rest = m_prefix.group(2)
 
-    # Buscar número RSN
     m_rsn = re.search(r"(RSN\d+)", rest, flags=re.IGNORECASE)
 
     if m_rsn:
         base = prefix + m_rsn.group(1).upper()
         return base, direction
 
-    # Si no encuentra RSN, usa un método alternativo:
-    # elimina códigos finales tipo _GUK000, _GUK090, _CYC285, etc.
     base = re.sub(r"[_\-][A-Za-z]*\d{3}$", "", stem_no_dir)
 
     return base, direction
@@ -257,9 +325,77 @@ def build_pairs(uploaded_files):
 
 
 # ============================================================
-# NEWMARK BETA
+# NEWMARK BETA ACELERADO CON NUMBA
 # ============================================================
-def spectral_sa_sd_newmark(acc_g_m_s2, dt, period, damping=0.05):
+@njit(fastmath=True)
+def spectral_sa_sd_newmark_numba(acc_g_m_s2, dt, period, damping):
+    m = 1.0
+    w = 2.0 * np.pi / period
+    k = m * w * w
+    c = 2.0 * damping * m * w
+
+    beta = 0.25
+    gamma = 0.5
+
+    n = len(acc_g_m_s2)
+
+    u = np.zeros(n)
+    v = np.zeros(n)
+    a = np.zeros(n)
+
+    p0 = -m * acc_g_m_s2[0]
+    a[0] = (p0 - c * v[0] - k * u[0]) / m
+
+    a0 = 1.0 / (beta * dt * dt)
+    a1 = gamma / (beta * dt)
+    a2 = 1.0 / (beta * dt)
+    a3 = 1.0 / (2.0 * beta) - 1.0
+    a4 = gamma / beta - 1.0
+    a5 = dt * (gamma / (2.0 * beta) - 1.0)
+
+    k_eff = k + a0 * m + a1 * c
+
+    max_abs_u = 0.0
+
+    for i in range(1, n):
+        p_i = -m * acc_g_m_s2[i]
+
+        p_eff = (
+            p_i
+            + m * (a0 * u[i - 1] + a2 * v[i - 1] + a3 * a[i - 1])
+            + c * (a1 * u[i - 1] + a4 * v[i - 1] + a5 * a[i - 1])
+        )
+
+        u[i] = p_eff / k_eff
+        a[i] = a0 * (u[i] - u[i - 1]) - a2 * v[i - 1] - a3 * a[i - 1]
+        v[i] = v[i - 1] + dt * ((1.0 - gamma) * a[i - 1] + gamma * a[i])
+
+        au = abs(u[i])
+        if au > max_abs_u:
+            max_abs_u = au
+
+    sd_m = max_abs_u
+    psa_m_s2 = w * w * sd_m
+    sa_g = psa_m_s2 / 9.80665
+
+    return sa_g, sd_m
+
+
+@njit(parallel=True, fastmath=True)
+def response_spectrum_numba(acc, dt, periods, damping):
+    nT = len(periods)
+    sa_vals = np.zeros(nT)
+    sd_vals = np.zeros(nT)
+
+    for i in prange(nT):
+        sa_g, sd_m = spectral_sa_sd_newmark_numba(acc, dt, periods[i], damping)
+        sa_vals[i] = sa_g
+        sd_vals[i] = sd_m
+
+    return sa_vals, sd_vals
+
+
+def spectral_sa_sd_newmark_python(acc_g_m_s2, dt, period, damping=0.05):
     if period <= 0:
         raise ValueError("El período debe ser mayor que cero.")
     if dt <= 0:
@@ -319,16 +455,24 @@ def spectral_sa_sd_newmark(acc_g_m_s2, dt, period, damping=0.05):
 
 @st.cache_data(show_spinner=False)
 def response_spectrum_cached(acc_tuple, dt, periods_tuple, damping):
-    acc = np.asarray(acc_tuple, dtype=float)
-    periods = np.asarray(periods_tuple, dtype=float)
+    acc = np.asarray(acc_tuple, dtype=np.float64)
+    periods = np.asarray(periods_tuple, dtype=np.float64)
 
-    sa_vals = np.zeros_like(periods, dtype=float)
-    sd_vals = np.zeros_like(periods, dtype=float)
+    if NUMBA_AVAILABLE:
+        sa_vals, sd_vals = response_spectrum_numba(
+            acc,
+            float(dt),
+            periods,
+            float(damping)
+        )
+    else:
+        sa_vals = np.zeros_like(periods, dtype=float)
+        sd_vals = np.zeros_like(periods, dtype=float)
 
-    for i, T in enumerate(periods):
-        sa_g, sd_m = spectral_sa_sd_newmark(acc, float(dt), float(T), float(damping))
-        sa_vals[i] = sa_g
-        sd_vals[i] = sd_m
+        for i, T in enumerate(periods):
+            sa_g, sd_m = spectral_sa_sd_newmark_python(acc, float(dt), float(T), float(damping))
+            sa_vals[i] = sa_g
+            sd_vals[i] = sd_m
 
     return pd.DataFrame({
         "T (s)": periods,
@@ -366,26 +510,105 @@ def compute_individual_pair_factor(srss, target_sa, mask_range, criterion="100%"
 
 
 # ============================================================
+# FRAGILIDAD
+# ============================================================
+def fit_lognormal_fragility(im_values, exceedance):
+    im_values = np.asarray(im_values, dtype=float)
+    y = np.asarray(exceedance, dtype=int)
+
+    mask = np.isfinite(im_values) & (im_values > 0) & np.isfinite(y)
+    im_values = im_values[mask]
+    y = y[mask]
+
+    if len(im_values) < 4:
+        return None, None, "Se necesitan al menos 4 puntos."
+
+    if len(np.unique(y)) < 2:
+        return None, None, "No se puede ajustar: todos los puntos son 0 o todos son 1."
+
+    def neg_loglike(params):
+        ln_theta, ln_beta = params
+        beta = np.exp(ln_beta)
+
+        z = (np.log(im_values) - ln_theta) / beta
+        p = norm.cdf(z)
+        p = np.clip(p, 1e-8, 1.0 - 1e-8)
+
+        return -np.sum(y * np.log(p) + (1 - y) * np.log(1 - p))
+
+    x0 = np.array([np.log(np.median(im_values)), np.log(0.40)])
+    res = minimize(neg_loglike, x0, method="Nelder-Mead")
+
+    if not res.success:
+        return None, None, "No se pudo ajustar."
+
+    theta = float(np.exp(res.x[0]))
+    beta = float(np.exp(res.x[1]))
+
+    return theta, beta, "OK"
+
+
+def fragility_probability(im_grid, theta, beta):
+    return norm.cdf((np.log(im_grid) - np.log(theta)) / beta)
+
+
+def build_fragility_dataframe(pair_results_df, drift_df, drift_limits):
+    df = pair_results_df.copy()
+
+    if drift_df is None:
+        raise ValueError("Debes cargar una tabla de derivas máximas para generar curvas de fragilidad por deriva.")
+
+    drift_df = drift_df.copy()
+    drift_df["Par"] = drift_df["Par"].astype(str).str.strip()
+    df["Par"] = df["Par"].astype(str).str.strip()
+
+    df = df.merge(drift_df, on="Par", how="left")
+
+    missing = df[df["Deriva_maxima_%"].isna()]["Par"].tolist()
+    if missing:
+        st.warning(
+            "No se encontró deriva para estos pares. Se excluirán de la fragilidad: "
+            + ", ".join(missing[:15])
+            + ("..." if len(missing) > 15 else "")
+        )
+
+    df = df.dropna(subset=["Deriva_maxima_%"])
+
+    if df.empty:
+        raise ValueError("No hay pares con deriva máxima válida.")
+
+    ds1, ds2, ds3, ds4 = drift_limits
+
+    df["DS1 leve"] = (df["Deriva_maxima_%"] >= ds1).astype(int)
+    df["DS2 moderado"] = (df["Deriva_maxima_%"] >= ds2).astype(int)
+    df["DS3 severo"] = (df["Deriva_maxima_%"] >= ds3).astype(int)
+    df["DS4 colapso"] = (df["Deriva_maxima_%"] >= ds4).astype(int)
+
+    return df
+
+
+# ============================================================
 # STREAMLIT APP
 # ============================================================
 st.set_page_config(
-    page_title="Escalamiento SRSS Pares",
+    page_title="SRSS + Fragilidad",
     page_icon="📈",
     layout="wide"
 )
 
-st.title("📈 Pares N/E: SRSS, media y escalamiento opcional")
+st.title("📈 Pares N/E: SRSS, escalamiento opcional y curvas de fragilidad")
 
 st.markdown(
     """
-Esta app permite dos flujos:
+Esta app permite:
 
 ```text
-1. Registros sin escalar → calcula factor contra espectro objetivo y genera escalados.
-2. Registros ya escalados → no pide espectro objetivo, no escala, usa factor = 1.0.
+1. Leer pares N/E.
+2. Calcular espectros Sa y SRSS.
+3. Escalar opcionalmente contra espectro objetivo.
+4. Usar registros ya escalados con factor = 1.0.
+5. Generar curvas de fragilidad usando derivas máximas.
 ```
-
-Los pares se detectan automáticamente usando archivos que terminan en `_N` y `_E`.
 """
 )
 
@@ -395,7 +618,7 @@ with st.sidebar:
     already_scaled = st.checkbox(
         "Mis registros ya están escalados",
         value=False,
-        help="Activa esto si tus registros ya fueron escalados previamente, por ejemplo con RotD50. En ese caso no se solicita espectro objetivo ni se aplica factor de escala."
+        help="Activa esto si tus registros ya fueron escalados previamente, por ejemplo con RotD50."
     )
 
     st.header("1. Parámetros estructurales")
@@ -504,13 +727,26 @@ with st.sidebar:
     show_individual = st.checkbox("Mostrar SRSS individuales", value=False)
     show_original_mean = st.checkbox("Mostrar media SRSS original", value=True)
 
-    st.header("5. Exportación")
+    st.header("5. Fragilidad")
+
+    enable_fragility = st.checkbox("Generar curvas de fragilidad", value=True)
+
+    st.caption("Límites de daño por deriva máxima de entrepiso en %.")
+
+    ds1_limit = st.number_input("DS1 leve: deriva ≥ (%)", min_value=0.001, value=0.50, step=0.10, format="%.3f")
+    ds2_limit = st.number_input("DS2 moderado: deriva ≥ (%)", min_value=0.001, value=1.00, step=0.10, format="%.3f")
+    ds3_limit = st.number_input("DS3 severo: deriva ≥ (%)", min_value=0.001, value=2.00, step=0.10, format="%.3f")
+    ds4_limit = st.number_input("DS4 colapso: deriva ≥ (%)", min_value=0.001, value=4.00, step=0.10, format="%.3f")
+
+    st.header("6. Exportación")
 
     generar_zip = st.checkbox(
         "Generar ZIP con acelerogramas procesados",
         value=not already_scaled,
         help="Si los registros ya están escalados, normalmente no necesitas generar ZIP."
     )
+
+st.sidebar.caption(f"Numba disponible: {'Sí' if NUMBA_AVAILABLE else 'No'}")
 
 
 uploaded_records = st.file_uploader(
@@ -528,6 +764,14 @@ if not already_scaled:
     )
 else:
     st.info("Modo registros ya escalados: no se requiere espectro objetivo.")
+
+uploaded_drifts = None
+if enable_fragility:
+    uploaded_drifts = st.file_uploader(
+        "Sube tabla de derivas máximas: Par, Deriva_maxima_%",
+        type=["txt", "csv"],
+        key="drifts"
+    )
 
 
 if uploaded_records:
@@ -578,7 +822,6 @@ if can_process:
 
         pair_results = []
         srss_matrix = []
-        spectra_store = {}
         parsed_files_store = {}
 
         progress = st.progress(0, text="Calculando espectros de pares...")
@@ -625,13 +868,6 @@ if can_process:
             saN_T1 = float(np.interp(T1, periods, sa_N))
             saE_T1 = float(np.interp(T1, periods, sa_E))
             srss_T1 = float(np.sqrt(saN_T1**2 + saE_T1**2))
-
-            spectra_store[base_name] = {
-                "T": periods,
-                "Sa_N": sa_N,
-                "Sa_E": sa_E,
-                "SRSS": srss
-            }
 
             parsed_files_store[base_name] = {
                 "N": {
@@ -704,6 +940,11 @@ if can_process:
         pair_results_df = pd.DataFrame(pair_results)
         pair_results_df["Factor aplicado"] = pair_factors
         pair_results_df["Registros ya escalados"] = "Sí" if already_scaled else "No"
+
+        # IM final por par para fragilidad: SRSS(T1) luego de aplicar factor
+        srss_t1_col = f"SRSS(T1={T1:.3f}s) (g)"
+        pair_results_df["IM_SRSS_T1_final (g)"] = pair_results_df[srss_t1_col] * pair_results_df["Factor aplicado"]
+
         st.dataframe(pair_results_df, use_container_width=True)
         st.info(factor_message)
 
@@ -730,7 +971,7 @@ if can_process:
         st.dataframe(summary_df, use_container_width=True)
 
         # ====================================================
-        # GRÁFICA
+        # GRÁFICA SRSS
         # ====================================================
         st.subheader("4. Gráfica SRSS")
 
@@ -878,9 +1119,119 @@ if can_process:
             st.dataframe(check_df, use_container_width=True)
 
         # ====================================================
-        # DESCARGAS
+        # FRAGILIDAD
         # ====================================================
-        st.subheader("6. Descargas")
+        st.subheader("6. Curvas de fragilidad")
+
+        if enable_fragility:
+            if uploaded_drifts is None:
+                st.warning("Para generar curvas de fragilidad debes subir la tabla de derivas máximas.")
+                st.markdown(
+                    """
+Formato esperado:
+
+```text
+Par,Deriva_maxima_%
+1_RSN730,0.45
+1_RSN755,0.82
+1_RSN767,1.35
+```
+
+El nombre de `Par` debe coincidir con la tabla de pares detectados.
+"""
+                )
+            else:
+                drift_df = read_drift_file(uploaded_drifts)
+
+                frag_df = build_fragility_dataframe(
+                    pair_results_df,
+                    drift_df,
+                    drift_limits=(ds1_limit, ds2_limit, ds3_limit, ds4_limit)
+                )
+
+                st.markdown("**Datos usados para fragilidad**")
+                st.dataframe(frag_df, use_container_width=True)
+
+                im_values = frag_df["IM_SRSS_T1_final (g)"].to_numpy(dtype=float)
+
+                damage_states = {
+                    "DS1 Leve": frag_df["DS1 leve"].to_numpy(dtype=int),
+                    "DS2 Moderado": frag_df["DS2 moderado"].to_numpy(dtype=int),
+                    "DS3 Severo": frag_df["DS3 severo"].to_numpy(dtype=int),
+                    "DS4 Colapso": frag_df["DS4 colapso"].to_numpy(dtype=int),
+                }
+
+                im_min = max(0.001, np.nanmin(im_values) * 0.50)
+                im_max = max(np.nanmax(im_values) * 1.50, 0.01)
+                im_grid = np.linspace(im_min, im_max, 400)
+
+                fig_frag = go.Figure()
+                fit_rows = []
+
+                for ds_name, exceedance in damage_states.items():
+                    theta, beta, status = fit_lognormal_fragility(im_values, exceedance)
+
+                    zeros = int(np.sum(exceedance == 0))
+                    ones = int(np.sum(exceedance == 1))
+
+                    if theta is not None:
+                        prob = fragility_probability(im_grid, theta, beta)
+                        fig_frag.add_trace(go.Scatter(
+                            x=im_grid,
+                            y=prob,
+                            mode="lines",
+                            name=ds_name
+                        ))
+
+                    fit_rows.append({
+                        "Estado de daño": ds_name,
+                        "Cantidad 0": zeros,
+                        "Cantidad 1": ones,
+                        "θ mediana IM SRSS(T1) (g)": theta,
+                        "β dispersión lognormal": beta,
+                        "Estado ajuste": status
+                    })
+
+                fig_frag.update_layout(
+                    title="Curvas de fragilidad por deriva máxima",
+                    xaxis_title="IM = SRSS(T1) final [g]",
+                    yaxis_title="P(DS ≥ ds | IM)",
+                    yaxis=dict(range=[0, 1]),
+                    legend_title="Estados de daño",
+                    height=600
+                )
+
+                st.plotly_chart(fig_frag, use_container_width=True)
+
+                fit_df = pd.DataFrame(fit_rows)
+                st.markdown("**Parámetros ajustados**")
+                st.dataframe(fit_df, use_container_width=True)
+
+                csv_frag = frag_df.to_csv(index=False).encode("utf-8")
+                csv_fit = fit_df.to_csv(index=False).encode("utf-8")
+
+                cfrag1, cfrag2 = st.columns(2)
+                with cfrag1:
+                    st.download_button(
+                        "Descargar datos fragilidad CSV",
+                        data=csv_frag,
+                        file_name="datos_fragilidad_derivas.csv",
+                        mime="text/csv"
+                    )
+                with cfrag2:
+                    st.download_button(
+                        "Descargar parametros fragilidad CSV",
+                        data=csv_fit,
+                        file_name="parametros_fragilidad.csv",
+                        mime="text/csv"
+                    )
+        else:
+            st.info("Módulo de fragilidad desactivado.")
+
+        # ====================================================
+        # DESCARGAS GENERALES
+        # ====================================================
+        st.subheader("7. Descargas generales")
 
         csv_pairs = pair_results_df.to_csv(index=False).encode("utf-8")
 
@@ -960,59 +1311,66 @@ if can_process:
                 mime="application/zip"
             )
 
-        with st.expander("Formato esperado del espectro objetivo"):
+        with st.expander("Formato tabla de derivas"):
             st.markdown(
                 """
-Solo se solicita cuando **Mis registros ya están escalados** está desactivado.
-
-El archivo del espectro objetivo debe tener dos columnas:
+Para curvas de fragilidad debes cargar una tabla así:
 
 ```text
-T      Sa
-0.01   0.80
-0.02   0.95
-0.10   1.75
-0.50   1.75
-1.00   1.30
-2.00   0.65
+Par,Deriva_maxima_%
+1_RSN730,0.45
+1_RSN755,0.82
+1_RSN767,1.35
+```
+
+La deriva debe estar en porcentaje.  
+Por ejemplo:
+
+```text
+0.50 = 0.50 %
+1.20 = 1.20 %
 ```
 """
             )
 
-        with st.expander("Criterio usado"):
+        with st.expander("Criterio usado para fragilidad"):
             st.markdown(
                 r"""
-Para cada par se calcula:
+La intensidad usada es:
 
 \[
-Sa_{SRSS}(T)=\sqrt{Sa_N(T)^2+Sa_E(T)^2}
+IM = SRSS(T_1)
 \]
 
-Luego se calcula la media:
+Para cada par:
 
 \[
-\overline{Sa}_{SRSS}(T)=\frac{1}{n}\sum_{i=1}^{n}Sa_{SRSS,i}(T)
+SRSS(T_1)=\sqrt{Sa_N(T_1)^2+Sa_E(T_1)^2}
 \]
 
-Si los registros **no están escalados**, se puede calcular:
+Si los registros fueron escalados en el programa:
 
 \[
-FAC=\max\left(\frac{Sa_{objetivo}(T)}{\overline{Sa}_{SRSS}(T)}\right)
+IM_{final}=SRSS(T_1)\cdot Factor
 \]
 
-dentro del rango:
+Si los registros ya estaban escalados:
 
 \[
-0.2T_1 \leq T \leq 1.5T_1
+Factor=1.0
 \]
 
-Si los registros **ya están escalados**, se usa:
+Luego, para cada deriva máxima:
 
 \[
-FAC=1.0
+DS_i = 1 \quad \text{si} \quad IDR_{max} \geq IDR_{DS_i}
 \]
 
-y se omite el espectro objetivo.
+y se ajusta:
+
+\[
+P(DS \geq ds|IM)=\Phi\left(\frac{\ln(IM)-\ln(\theta)}{\beta}\right)
+\]
 """
             )
 
