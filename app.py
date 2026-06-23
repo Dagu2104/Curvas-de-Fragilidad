@@ -731,6 +731,13 @@ with st.sidebar:
 
     enable_fragility = st.checkbox("Generar curvas de fragilidad", value=True)
 
+    fragility_im_type = st.radio(
+        "IM para curvas de fragilidad",
+        ["Sa SRSS(T1) [g]", "Sd SRSS(T1) [cm]"],
+        index=0,
+        help="Escoge si la curva de fragilidad se ajusta usando aceleración espectral SRSS(T1) o desplazamiento espectral SRSS(T1)."
+    )
+
     st.caption("Límites de daño por deriva máxima de entrepiso en %.")
 
     ds1_limit = st.number_input("DS1 leve: deriva ≥ (%)", min_value=0.001, value=0.50, step=0.10, format="%.3f")
@@ -858,8 +865,11 @@ if can_process:
 
             sa_N = spec_N["Sa (g)"].to_numpy(dtype=float)
             sa_E = spec_E["Sa (g)"].to_numpy(dtype=float)
+            sd_N_cm_arr = spec_N["Sd (cm)"].to_numpy(dtype=float)
+            sd_E_cm_arr = spec_E["Sd (cm)"].to_numpy(dtype=float)
 
             srss = np.sqrt(sa_N**2 + sa_E**2)
+            srss_sd_cm = np.sqrt(sd_N_cm_arr**2 + sd_E_cm_arr**2)
             srss_matrix.append(srss)
 
             pga_N = np.max(np.abs(acc_N_m_s2)) / G
@@ -868,6 +878,10 @@ if can_process:
             saN_T1 = float(np.interp(T1, periods, sa_N))
             saE_T1 = float(np.interp(T1, periods, sa_E))
             srss_T1 = float(np.sqrt(saN_T1**2 + saE_T1**2))
+
+            sdN_T1_cm = float(np.interp(T1, periods, sd_N_cm_arr))
+            sdE_T1_cm = float(np.interp(T1, periods, sd_E_cm_arr))
+            srss_sd_T1_cm = float(np.sqrt(sdN_T1_cm**2 + sdE_T1_cm**2))
 
             parsed_files_store[base_name] = {
                 "N": {
@@ -896,7 +910,10 @@ if can_process:
                 "PGA E (g)": pga_E,
                 f"Sa_N(T1={T1:.3f}s) (g)": saN_T1,
                 f"Sa_E(T1={T1:.3f}s) (g)": saE_T1,
-                f"SRSS(T1={T1:.3f}s) (g)": srss_T1
+                f"SRSS_Sa(T1={T1:.3f}s) (g)": srss_T1,
+                f"Sd_N(T1={T1:.3f}s) (cm)": sdN_T1_cm,
+                f"Sd_E(T1={T1:.3f}s) (cm)": sdE_T1_cm,
+                f"SRSS_Sd(T1={T1:.3f}s) (cm)": srss_sd_T1_cm
             })
 
             progress.progress((idx + 1) / len(complete_pairs), text=f"Calculando {idx+1}/{len(complete_pairs)} pares")
@@ -942,8 +959,10 @@ if can_process:
         pair_results_df["Registros ya escalados"] = "Sí" if already_scaled else "No"
 
         # IM final por par para fragilidad: SRSS(T1) luego de aplicar factor
-        srss_t1_col = f"SRSS(T1={T1:.3f}s) (g)"
-        pair_results_df["IM_SRSS_T1_final (g)"] = pair_results_df[srss_t1_col] * pair_results_df["Factor aplicado"]
+        srss_sa_t1_col = f"SRSS_Sa(T1={T1:.3f}s) (g)"
+        srss_sd_t1_col = f"SRSS_Sd(T1={T1:.3f}s) (cm)"
+        pair_results_df["IM_SRSS_Sa_T1_final (g)"] = pair_results_df[srss_sa_t1_col] * pair_results_df["Factor aplicado"]
+        pair_results_df["IM_SRSS_Sd_T1_final (cm)"] = pair_results_df[srss_sd_t1_col] * pair_results_df["Factor aplicado"]
 
         st.dataframe(pair_results_df, use_container_width=True)
         st.info(factor_message)
@@ -1152,7 +1171,16 @@ El nombre de `Par` debe coincidir con la tabla de pares detectados.
                 st.markdown("**Datos usados para fragilidad**")
                 st.dataframe(frag_df, use_container_width=True)
 
-                im_values = frag_df["IM_SRSS_T1_final (g)"].to_numpy(dtype=float)
+                if fragility_im_type == "Sa SRSS(T1) [g]":
+                    im_col = "IM_SRSS_Sa_T1_final (g)"
+                    im_axis_label = "IM = Sa SRSS(T1) final [g]"
+                    theta_label = "θ mediana Sa SRSS(T1) [g]"
+                else:
+                    im_col = "IM_SRSS_Sd_T1_final (cm)"
+                    im_axis_label = "IM = Sd SRSS(T1) final [cm]"
+                    theta_label = "θ mediana Sd SRSS(T1) [cm]"
+
+                im_values = frag_df[im_col].to_numpy(dtype=float)
 
                 damage_states = {
                     "DS1 Leve": frag_df["DS1 leve"].to_numpy(dtype=int),
@@ -1187,14 +1215,14 @@ El nombre de `Par` debe coincidir con la tabla de pares detectados.
                         "Estado de daño": ds_name,
                         "Cantidad 0": zeros,
                         "Cantidad 1": ones,
-                        "θ mediana IM SRSS(T1) (g)": theta,
+                        theta_label: theta,
                         "β dispersión lognormal": beta,
                         "Estado ajuste": status
                     })
 
                 fig_frag.update_layout(
                     title="Curvas de fragilidad por deriva máxima",
-                    xaxis_title="IM = SRSS(T1) final [g]",
+                    xaxis_title=im_axis_label,
                     yaxis_title="P(DS ≥ ds | IM)",
                     yaxis=dict(range=[0, 1]),
                     legend_title="Estados de daño",
@@ -1336,22 +1364,34 @@ Por ejemplo:
         with st.expander("Criterio usado para fragilidad"):
             st.markdown(
                 r"""
-La intensidad usada es:
+La intensidad usada puede ser:
 
 \[
-IM = SRSS(T_1)
+IM = Sa_{SRSS}(T_1)
 \]
 
-Para cada par:
+ o también:
 
 \[
-SRSS(T_1)=\sqrt{Sa_N(T_1)^2+Sa_E(T_1)^2}
+IM = Sd_{SRSS}(T_1)
+\]
+
+Para cada par, si usas aceleración espectral:
+
+\[
+Sa_{SRSS}(T_1)=\sqrt{Sa_N(T_1)^2+Sa_E(T_1)^2}
+\]
+
+Si usas desplazamiento espectral:
+
+\[
+Sd_{SRSS}(T_1)=\sqrt{Sd_N(T_1)^2+Sd_E(T_1)^2}
 \]
 
 Si los registros fueron escalados en el programa:
 
 \[
-IM_{final}=SRSS(T_1)\cdot Factor
+IM_{final}=IM(T_1)\cdot Factor
 \]
 
 Si los registros ya estaban escalados:
