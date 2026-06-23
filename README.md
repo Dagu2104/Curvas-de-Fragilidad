@@ -1,36 +1,28 @@
-# Streamlit - Curvas de fragilidad con escalamiento a Sa objetivo
+# Streamlit - Curvas de fragilidad con Sa o Sd
 
-## Qué hace esta versión
+## Funciones principales
 
-Permite:
+Esta versión permite:
 
 1. Subir acelerogramas.
-2. Calcular Sa(T) original.
-3. Ingresar varios niveles de Sa objetivo.
-4. Escalar cada registro a cada Sa objetivo.
-5. Generar varios puntos para curvas de fragilidad.
-6. Descargar tablas CSV.
-7. Opcionalmente descargar los acelerogramas escalados en ZIP.
+2. Calcular Sa(T) y Sd(T).
+3. Elegir la medida de intensidad:
+   - Sa(T) en g
+   - Sd(T) en cm
+4. Escalar registros a varios niveles objetivo de Sa o Sd.
+5. Graficar espectros de respuesta:
+   - Espectro de aceleración Sa
+   - Espectro de desplazamiento Sd
+6. Escoger qué registros ver en las gráficas.
+7. Generar curvas de fragilidad lognormales.
 
-## Ejecución
+## Ejecutar
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Factor de escala
-
-```text
-FE = Sa_objetivo / Sa_original(T)
-```
-
-El acelerograma escalado es:
-
-```text
-a_escalado(t) = FE * a_original(t)
-```
-
 ## Nota técnica
 
-La versión actual define estados de daño con límites de Sa. Para curvas estructurales más rigurosas se debe usar respuesta estructural como deriva máxima.
+Esta versión define estados de daño con límites de Sa o Sd. Para curvas estructurales más rigurosas, se recomienda usar derivas máximas de entrepiso.
